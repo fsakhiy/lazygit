@@ -72,15 +72,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "commit-generator"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "cpufeatures"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -414,6 +405,15 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "lazycommit"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

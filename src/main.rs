@@ -38,9 +38,9 @@ struct ApiErrorResponse {
 
 fn print_help() {
     println!(
-        "commit-generator: Generate git commit messages using OpenAI API\n\n\
+        "lazycommit: Generate git commit messages using OpenAI API\n\n\
 USAGE:\n    \
-commit-generator [OPTIONS]\n\n\
+lazycommit [OPTIONS]\n\n\
 OPTIONS:\n    \
 -m, --model <MODEL>    Specify OpenAI model (default: env OPENAI_MODEL or 'gpt-4o-mini')\n    \
 -s, --staged           Inspect staged changes only\n    \
@@ -88,7 +88,9 @@ fn get_git_diff(staged_only: bool) -> Result<GitDiffResult, String> {
     }
 
     if staged_only {
-        return Err("No staged changes found. Use 'git add' to stage changes or omit --staged.".to_string());
+        return Err(
+            "No staged changes found. Use 'git add' to stage changes or omit --staged.".to_string(),
+        );
     }
 
     // Fall back to unstaged diff
@@ -143,7 +145,10 @@ fn main() {
                 }
             }
             unknown => {
-                eprintln!("Error: Unknown option '{}'. Run with --help for usage.", unknown);
+                eprintln!(
+                    "Error: Unknown option '{}'. Run with --help for usage.",
+                    unknown
+                );
                 exit(1);
             }
         }
@@ -164,7 +169,7 @@ fn main() {
 
     let model = model_arg
         .or_else(|| env::var("OPENAI_MODEL").ok())
-        .unwrap_or_else(|| "gpt-4o-mini".to_string());
+        .unwrap_or_else(|| "gpt-6-luna".to_string());
 
     let base_url = env::var("OPENAI_BASE_URL")
         .unwrap_or_else(|_| "https://api.openai.com/v1".to_string())
@@ -200,7 +205,10 @@ Rules:
 - Keep the summary line under 72 characters if possible.
 - If multiple distinct changes are made, you may include an optional short bulleted body after an empty line.";
 
-    let user_prompt = format!("Generate a commit message for the following git diff:\n\n{}", prepared_diff);
+    let user_prompt = format!(
+        "Generate a commit message for the following git diff:\n\n{}",
+        prepared_diff
+    );
 
     let request_body = ChatCompletionRequest {
         model,
@@ -261,7 +269,10 @@ Rules:
                 exit(1);
             }
         }
-        eprintln!("Error: OpenAI API request failed with status {}:\n{}", status, text);
+        eprintln!(
+            "Error: OpenAI API request failed with status {}:\n{}",
+            status, text
+        );
         exit(1);
     }
 
@@ -287,7 +298,10 @@ Rules:
     };
 
     if auto_commit {
-        println!("Generated commit message:\n----------------------------------------\n{}\n----------------------------------------", message);
+        println!(
+            "Generated commit message:\n----------------------------------------\n{}\n----------------------------------------",
+            message
+        );
         println!("Committing changes...");
 
         let mut git_cmd = Command::new("git");

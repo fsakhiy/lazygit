@@ -1,4 +1,4 @@
-# commit-generator 🤖
+# lazycommit 🤖
 
 A lightweight, fast Rust CLI tool that reads your `git diff` and uses OpenAI to automatically generate meaningful Conventional Commit messages.
 
@@ -23,7 +23,7 @@ A lightweight, fast Rust CLI tool that reads your `git diff` and uses OpenAI to 
 ### Option 1: Download Prebuilt Binaries
 Download the pre-compiled binary for your operating system from the **[Releases](../../releases)** page:
 - **Linux (`musl`)**: Single static binary that works on **Fedora, Arch, Debian, Ubuntu**, and Alpine.
-- **Windows**: `commit-generator.exe` (.zip)
+- **Windows**: `lazycommit.exe` (.zip)
 - **macOS**: Native builds for both Apple Silicon (M1/M2/M3/M4) and Intel.
 
 Unpack the archive and place the binary into a directory in your `PATH` (such as `~/.local/bin` or `/usr/local/bin`).
@@ -64,7 +64,7 @@ To make it permanent, add the export line above to your `~/.bashrc`, `~/.zshrc`,
 Stage your changes and run:
 ```bash
 git add <files>
-commit-generator
+lazycommit
 ```
 Output:
 ```text
@@ -74,7 +74,7 @@ feat: add auto-commit flag and multi-platform release workflow
 ### 2. Generate and commit directly (`-c` / `--commit`)
 Generate the message and automatically run `git commit` in one go:
 ```bash
-commit-generator -c
+lazycommit -c
 ```
 Output:
 ```text
@@ -92,7 +92,7 @@ Successfully committed!
 
 ```text
 USAGE:
-    commit-generator [OPTIONS]
+    lazycommit [OPTIONS]
 
 OPTIONS:
     -c, --commit           Automatically commit changes with the generated message
@@ -104,14 +104,14 @@ OPTIONS:
 
 ### 4. Git Alias / Workflow Tip
 
-You can create a custom git alias so you can run `git cg`:
+You can create a custom git alias so you can run `git lazy`:
 ```bash
-git config --global alias.cg '!commit-generator -c'
+git config --global alias.lazy '!lazycommit -c'
 ```
 Now, in any repository, simply run:
 ```bash
 git add .
-git cg
+git lazy
 ```
 
 ---
@@ -125,7 +125,7 @@ This repository is equipped with an automated GitHub Actions workflow (`.github/
 1. **Ensure your changes are committed and pushed to `main`**:
    ```bash
    git add .
-   git commit -m "chore: bump version to 0.1.0"
+   git commit -m "chore: rename binary to lazycommit"
    git push origin main
    ```
 
@@ -144,10 +144,10 @@ This repository is equipped with an automated GitHub Actions workflow (`.github/
    - Navigate to the **Actions** tab on your GitHub repository.
    - GitHub Actions will spin up Ubuntu, Windows, and macOS runners.
    - Once the build completes (~2–3 minutes), the release is published automatically on your repository's **Releases** tab with:
-     - `commit-generator-x86_64-linux.tar.gz` (Universal static Linux binary)
-     - `commit-generator-x86_64-windows.zip` (Windows executable)
-     - `commit-generator-aarch64-macos.tar.gz` (Apple Silicon Mac)
-     - `commit-generator-x86_64-macos.tar.gz` (Intel Mac)
+     - `lazycommit-x86_64-linux.tar.gz` (Universal static Linux binary)
+     - `lazycommit-x86_64-windows.zip` (Windows executable)
+     - `lazycommit-aarch64-macos.tar.gz` (Apple Silicon Mac)
+     - `lazycommit-x86_64-macos.tar.gz` (Intel Mac)
      - Auto-generated release notes and changelog.
 
 > [!NOTE]

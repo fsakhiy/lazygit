@@ -19,26 +19,26 @@ jobs:
           # Universal Linux (Fedora, Arch, Debian, Ubuntu, etc.)
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            artifact_name: commit-generator
-            asset_name: commit-generator-x86_64-linux.tar.gz
+            artifact_name: lazycommit
+            asset_name: lazycommit-x86_64-linux.tar.gz
 
           # Windows x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: commit-generator.exe
-            asset_name: commit-generator-x86_64-windows.zip
+            artifact_name: lazycommit.exe
+            asset_name: lazycommit-x86_64-windows.zip
 
           # macOS Apple Silicon (M1/M2/M3/M4)
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: commit-generator
-            asset_name: commit-generator-aarch64-macos.tar.gz
+            artifact_name: lazycommit
+            asset_name: lazycommit-aarch64-macos.tar.gz
 
           # macOS Intel
           - os: macos-13
             target: x86_64-apple-darwin
-            artifact_name: commit-generator
-            asset_name: commit-generator-x86_64-macos.tar.gz
+            artifact_name: lazycommit
+            asset_name: lazycommit-x86_64-macos.tar.gz
 
     steps:
       - name: Checkout code
