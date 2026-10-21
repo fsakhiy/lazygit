@@ -54,6 +54,7 @@ To make it permanent, add the export line above to your `~/.bashrc`, `~/.zshrc`,
 |---|---|---|
 | `OPENAI_API_KEY` | Your OpenAI API key (**required**) | None |
 | `OPENAI_MODEL` | Default OpenAI model to use | `gpt-4o-mini` |
+| `OPENAI_TEMPERATURE` | Sampling temperature (e.g. `0.2`) | Model default |
 | `OPENAI_BASE_URL` | Custom API base URL (for Ollama, Groq, etc.) | `https://api.openai.com/v1` |
 
 ---
@@ -97,7 +98,8 @@ USAGE:
 OPTIONS:
     -c, --commit           Automatically commit changes with the generated message
     -s, --staged           Inspect staged changes only (do not fall back to unstaged)
-    -m, --model <MODEL>    Specify OpenAI model (e.g. gpt-4o, gpt-3.5-turbo)
+    -m, --model <MODEL>    Specify OpenAI model (e.g. gpt-4o, o1-mini)
+    -t, --temperature <T>  Sampling temperature (e.g. 0.2)
     -h, --help             Print help information
     -v, --version          Print version information
 ```

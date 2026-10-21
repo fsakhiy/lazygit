@@ -12,7 +12,8 @@ struct ChatMessage {
 struct ChatCompletionRequest {
     model: String,
     messages: Vec<ChatMessage>,
-    temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +44,7 @@ USAGE:\n    \
 lazycommit [OPTIONS]\n\n\
 OPTIONS:\n    \
 -m, --model <MODEL>    Specify OpenAI model (default: env OPENAI_MODEL or 'gpt-4o-mini')\n    \
+-t, --temperature <T>  Sampling temperature (optional, default: model default)\n    \
 -s, --staged           Inspect staged changes only\n    \
 -c, --commit           Automatically commit changes with the generated message\n    \
 -h, --help             Print help information\n    \
@@ -50,6 +52,7 @@ OPTIONS:\n    \
 ENVIRONMENT VARIABLES:\n    \
 OPENAI_API_KEY         Your OpenAI API key (required)\n    \
 OPENAI_MODEL           Default model to use (optional, default: 'gpt-4o-mini')\n    \
+OPENAI_TEMPERATURE     Sampling temperature (optional, default: model default)\n    \
 OPENAI_BASE_URL        Custom API base URL (optional, default: 'https://api.openai.com/v1')"
     );
 }
@@ -115,6 +118,7 @@ fn get_git_diff(staged_only: bool) -> Result<GitDiffResult, String> {
 fn main() {
     let args: Vec<String> = env::args().collect();
     let mut model_arg: Option<String> = None;
+    let mut temp_arg: Option<f32> = None;
     let mut staged_only = false;
     let mut auto_commit = false;
 
@@ -126,7 +130,7 @@ fn main() {
                 return;
             }
             "-v" | "--version" => {
-                println!("commit-generator {}", env!("CARGO_PKG_VERSION"));
+                println!("lazycommit {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             "-s" | "--staged" => {
@@ -134,6 +138,21 @@ fn main() {
             }
             "-c" | "--commit" => {
                 auto_commit = true;
+            }
+            "-t" | "--temperature" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<f32>() {
+                        Ok(t) => temp_arg = Some(t),
+                        Err(_) => {
+                            eprintln!("Error: Invalid float value for --temperature");
+                            exit(1);
+                        }
+                    }
+                    i += 1;
+                } else {
+                    eprintln!("Error: Missing value for --temperature option");
+                    exit(1);
+                }
             }
             "-m" | "--model" => {
                 if i + 1 < args.len() {
@@ -210,6 +229,12 @@ Rules:
         prepared_diff
     );
 
+    let temperature = temp_arg.or_else(|| {
+        env::var("OPENAI_TEMPERATURE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+    });
+
     let request_body = ChatCompletionRequest {
         model,
         messages: vec![
@@ -222,7 +247,7 @@ Rules:
                 content: user_prompt,
             },
         ],
-        temperature: 0.2,
+        temperature,
     };
 
     let client = reqwest::blocking::Client::builder()
