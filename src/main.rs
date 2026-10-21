@@ -44,6 +44,7 @@ commit-generator [OPTIONS]\n\n\
 OPTIONS:\n    \
 -m, --model <MODEL>    Specify OpenAI model (default: env OPENAI_MODEL or 'gpt-4o-mini')\n    \
 -s, --staged           Inspect staged changes only\n    \
+-c, --commit           Automatically commit changes with the generated message\n    \
 -h, --help             Print help information\n    \
 -v, --version          Print version information\n\n\
 ENVIRONMENT VARIABLES:\n    \
@@ -51,6 +52,11 @@ OPENAI_API_KEY         Your OpenAI API key (required)\n    \
 OPENAI_MODEL           Default model to use (optional, default: 'gpt-4o-mini')\n    \
 OPENAI_BASE_URL        Custom API base URL (optional, default: 'https://api.openai.com/v1')"
     );
+}
+
+struct GitDiffResult {
+    diff: String,
+    is_staged: bool,
 }
 
 fn run_git(args: &[&str]) -> Result<String, String> {
@@ -67,7 +73,7 @@ fn run_git(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn get_git_diff(staged_only: bool) -> Result<String, String> {
+fn get_git_diff(staged_only: bool) -> Result<GitDiffResult, String> {
     // Check if in git repository
     run_git(&["rev-parse", "--is-inside-work-tree"])
         .map_err(|_| "Current directory is not inside a git repository.".to_string())?;
@@ -75,7 +81,10 @@ fn get_git_diff(staged_only: bool) -> Result<String, String> {
     // Try staged diff first
     let staged_diff = run_git(&["diff", "--cached"])?;
     if !staged_diff.trim().is_empty() {
-        return Ok(staged_diff);
+        return Ok(GitDiffResult {
+            diff: staged_diff,
+            is_staged: true,
+        });
     }
 
     if staged_only {
@@ -86,7 +95,10 @@ fn get_git_diff(staged_only: bool) -> Result<String, String> {
     let unstaged_diff = run_git(&["diff"])?;
     if !unstaged_diff.trim().is_empty() {
         eprintln!("Note: No staged changes found, using unstaged diff.");
-        return Ok(unstaged_diff);
+        return Ok(GitDiffResult {
+            diff: unstaged_diff,
+            is_staged: false,
+        });
     }
 
     // Check if there are untracked files
@@ -102,6 +114,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let mut model_arg: Option<String> = None;
     let mut staged_only = false;
+    let mut auto_commit = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -116,6 +129,9 @@ fn main() {
             }
             "-s" | "--staged" => {
                 staged_only = true;
+            }
+            "-c" | "--commit" => {
+                auto_commit = true;
             }
             "-m" | "--model" => {
                 if i + 1 < args.len() {
@@ -155,7 +171,7 @@ fn main() {
         .trim_end_matches('/')
         .to_string();
 
-    let diff = match get_git_diff(staged_only) {
+    let diff_result = match get_git_diff(staged_only) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -165,13 +181,13 @@ fn main() {
 
     // Truncate diff if excessively large (~30,000 characters)
     let max_len = 30_000;
-    let prepared_diff = if diff.len() > max_len {
+    let prepared_diff = if diff_result.diff.len() > max_len {
         eprintln!("Warning: Git diff is very large; truncating to 30,000 characters.");
-        let mut truncated = diff[..max_len].to_string();
+        let mut truncated = diff_result.diff[..max_len].to_string();
         truncated.push_str("\n\n[...diff truncated due to size limit...]");
         truncated
     } else {
-        diff
+        diff_result.diff
     };
 
     let system_prompt = "\
@@ -257,19 +273,45 @@ Rules:
         }
     };
 
-    let message = parsed
+    let message = match parsed
         .choices
         .as_ref()
         .and_then(|c| c.first())
-        .and_then(|choice| choice.message.content.as_ref());
-
-    match message {
-        Some(content) => {
-            println!("{}", content.trim());
-        }
+        .and_then(|choice| choice.message.content.as_ref())
+    {
+        Some(content) => content.trim().to_string(),
         None => {
             eprintln!("Error: Received empty response from OpenAI.");
             exit(1);
         }
+    };
+
+    if auto_commit {
+        println!("Generated commit message:\n----------------------------------------\n{}\n----------------------------------------", message);
+        println!("Committing changes...");
+
+        let mut git_cmd = Command::new("git");
+        git_cmd.arg("commit");
+        if !diff_result.is_staged {
+            git_cmd.arg("-a");
+        }
+        git_cmd.args(["-m", &message]);
+
+        let status = git_cmd.status();
+        match status {
+            Ok(s) if s.success() => {
+                println!("Successfully committed!");
+            }
+            Ok(s) => {
+                eprintln!("git commit failed with exit code: {:?}", s.code());
+                exit(s.code().unwrap_or(1));
+            }
+            Err(e) => {
+                eprintln!("Error executing 'git commit': {}", e);
+                exit(1);
+            }
+        }
+    } else {
+        println!("{}", message);
     }
 }
