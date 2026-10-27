@@ -2,18 +2,21 @@
 
 A lightweight, fast Rust CLI tool that reads your `git diff` and uses OpenAI to automatically generate meaningful Conventional Commit messages.
 
+The project also includes a native desktop app for selecting a repository, reviewing its changes, generating a message, and committing from a window.
+
 ---
 
 ## ✨ Features
 
 - **Automated Commit Messages**: Analyzes git changes and infers concise Conventional Commit messages (`feat:`, `fix:`, `refactor:`, `chore:`, etc.).
 - **Auto-Commit Option (`-c` / `--commit`)**: Generates the commit message and automatically executes `git commit` in one step.
+- **Daily End-of-Day (EOD) Reports**: Scans across multiple repositories for committed work and uses OpenAI to write a boss-ready daily report (`lazyreport` binary and in `lazycommit-gui`).
 - **Smart Diff Inspection**:
   - Prioritizes **staged changes** (`git diff --staged`).
   - Automatically falls back to **unstaged modifications** if nothing is staged.
   - Detects untracked files and alerts you to stage them.
 - **Fast & Self-Contained**: Built with pure Rust TLS (`rustls`). No OpenSSL runtime dependencies.
-- **Customizable LLMs**: Defaults to the fast and inexpensive `gpt-4o-mini`. Easily switch models with `-m` or environment variables.
+- **Customizable LLMs**: Defaults to `gpt-6-luna`. Easily switch models with `-m` or environment variables.
 - **Any OpenAI-Compatible API**: Works with Groq, Ollama, OpenRouter, vLLM, or any local/custom endpoint via `OPENAI_BASE_URL`.
 
 ---
@@ -36,6 +39,12 @@ cd lazygit
 cargo install --path .
 ```
 
+To launch the native desktop app from a source checkout, run:
+
+```bash
+cargo run --bin lazycommit-gui
+```
+
 ---
 
 ## ⚙️ Configuration
@@ -53,13 +62,19 @@ To make it permanent, add the export line above to your `~/.bashrc`, `~/.zshrc`,
 | Variable | Description | Default |
 |---|---|---|
 | `OPENAI_API_KEY` | Your OpenAI API key (**required**) | None |
-| `OPENAI_MODEL` | Default OpenAI model to use | `gpt-4o-mini` |
+| `OPENAI_MODEL` | Default OpenAI model to use | `gpt-6-luna` |
 | `OPENAI_TEMPERATURE` | Sampling temperature (e.g. `0.2`) | Model default |
 | `OPENAI_BASE_URL` | Custom API base URL (for Ollama, Groq, etc.) | `https://api.openai.com/v1` |
 
 ---
 
 ## 💻 Usage
+
+### Native desktop app
+
+Launch `lazycommit-gui` (or run `cargo run --bin lazycommit-gui` from the source checkout) to choose a Git project folder. Open multiple projects as tabs; each keeps its own diff, selected file, status, and commit message. Pass a directory to open it directly, for example `lazycommit-gui .` or `cargo run --bin lazycommit-gui -- .`. The app shows the changed-file list and diff, then lets you generate and edit a message. It only runs `git commit` when you press **Commit**. It uses the same `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_TEMPERATURE`, and `OPENAI_BASE_URL` environment variables as the CLI. Untracked files are shown as a reminder and must be staged before they can be included.
+
+The CLI remains available as `lazycommit`.
 
 ### 1. Generate a commit message
 Stage your changes and run:
@@ -104,7 +119,24 @@ OPTIONS:
     -v, --version          Print version information
 ```
 
-### 4. Git Alias / Workflow Tip
+### 4. Cross-Project Daily Reports (`lazyreport`)
+
+Generate a structured End-of-Day (EOD) summary of everything you committed across all your repositories today:
+
+```bash
+# Scan all repositories in ~/Documents/code (or any parent folder)
+lazyreport ~/Documents/code
+
+# Preview raw git commits across projects without calling AI
+lazyreport --raw ~/Documents/code
+
+# Filter by time window or specific author
+lazyreport --since="yesterday" --author="you@example.com" ~/Documents/code
+```
+
+In the desktop app (`lazycommit-gui`), click the **"📋 Daily Report"** button in the top bar to generate a report across your open workspace tabs or any scanned directory, then copy it with one click.
+
+### 5. Git Alias / Workflow Tip
 
 You can create a custom git alias so you can run `git lazy`:
 ```bash

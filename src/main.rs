@@ -1,41 +1,6 @@
-use serde::{Deserialize, Serialize};
+use lazycommit::{generate_commit_message, prepare_diff};
 use std::env;
 use std::process::{Command, exit};
-
-#[derive(Serialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Serialize)]
-struct ChatCompletionRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-}
-
-#[derive(Deserialize)]
-struct ChatChoice {
-    message: ChatMessageResponse,
-}
-
-#[derive(Deserialize)]
-struct ChatMessageResponse {
-    content: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ChatCompletionResponse {
-    choices: Option<Vec<ChatChoice>>,
-    error: Option<ApiErrorResponse>,
-}
-
-#[derive(Deserialize)]
-struct ApiErrorResponse {
-    message: String,
-}
 
 fn print_help() {
     println!(
@@ -43,7 +8,7 @@ fn print_help() {
 USAGE:\n    \
 lazycommit [OPTIONS]\n\n\
 OPTIONS:\n    \
--m, --model <MODEL>    Specify OpenAI model (default: env OPENAI_MODEL or 'gpt-4o-mini')\n    \
+-m, --model <MODEL>    Specify OpenAI model (default: env OPENAI_MODEL or 'gpt-6-luna')\n    \
 -t, --temperature <T>  Sampling temperature (optional, default: model default)\n    \
 -s, --staged           Inspect staged changes only\n    \
 -c, --commit           Automatically commit changes with the generated message\n    \
@@ -51,7 +16,7 @@ OPTIONS:\n    \
 -v, --version          Print version information\n\n\
 ENVIRONMENT VARIABLES:\n    \
 OPENAI_API_KEY         Your OpenAI API key (required)\n    \
-OPENAI_MODEL           Default model to use (optional, default: 'gpt-4o-mini')\n    \
+OPENAI_MODEL           Default model to use (optional, default: 'gpt-6-luna')\n    \
 OPENAI_TEMPERATURE     Sampling temperature (optional, default: model default)\n    \
 OPENAI_BASE_URL        Custom API base URL (optional, default: 'https://api.openai.com/v1')"
     );
@@ -163,6 +128,13 @@ fn main() {
                     exit(1);
                 }
             }
+            "report" | "--report" => {
+                eprintln!(
+                    "Tip: Daily reports across repositories are generated using the 'lazyreport' command.\n\
+                     Run 'lazyreport --help' or 'lazyreport [PATH]'."
+                );
+                exit(1);
+            }
             unknown => {
                 eprintln!(
                     "Error: Unknown option '{}'. Run with --help for usage.",
@@ -203,124 +175,27 @@ fn main() {
         }
     };
 
-    // Truncate diff if excessively large (~30,000 characters)
-    let max_len = 30_000;
-    let prepared_diff = if diff_result.diff.len() > max_len {
-        eprintln!("Warning: Git diff is very large; truncating to 30,000 characters.");
-        let mut truncated = diff_result.diff[..max_len].to_string();
-        truncated.push_str("\n\n[...diff truncated due to size limit...]");
-        truncated
-    } else {
-        diff_result.diff
-    };
-
-    let system_prompt = "\
-You are an expert developer assistant specialized in creating git commit messages.
-Generate a concise, high-quality git commit message summarizing the provided git diff.
-Follow the Conventional Commits specification (e.g. feat:, fix:, chore:, refactor:, docs:).
-Rules:
-- Provide only the commit message.
-- Do NOT wrap the message in markdown code blocks or quotes.
-- Keep the summary line under 72 characters if possible.
-- If multiple distinct changes are made, you may include an optional short bulleted body after an empty line.";
-
-    let user_prompt = format!(
-        "Generate a commit message for the following git diff:\n\n{}",
-        prepared_diff
-    );
+    // Roughly 4 characters per token; tokenization varies by content and model.
+    let (_, was_truncated) = prepare_diff(&diff_result.diff);
+    if was_truncated {
+        eprintln!(
+            "Warning: Git diff is very large; truncating to 800,000 characters (~200k tokens)."
+        );
+    }
 
     let temperature = temp_arg.or_else(|| {
         env::var("OPENAI_TEMPERATURE")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
     });
-
-    let request_body = ChatCompletionRequest {
-        model,
-        messages: vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: system_prompt.to_string(),
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: user_prompt,
-            },
-        ],
-        temperature,
-    };
-
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(45))
-        .build();
-
-    let client = match client {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error: Failed to create HTTP client: {}", e);
-            exit(1);
-        }
-    };
-
-    let endpoint = format!("{}/chat/completions", base_url);
-
-    let response = client
-        .post(&endpoint)
-        .bearer_auth(api_key)
-        .json(&request_body)
-        .send();
-
-    let response = match response {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Error: Failed to send request to OpenAI API: {}", e);
-            exit(1);
-        }
-    };
-
-    let status = response.status();
-    let text = match response.text() {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Error: Failed to read API response: {}", e);
-            exit(1);
-        }
-    };
-
-    if !status.is_success() {
-        if let Ok(err_resp) = serde_json::from_str::<ChatCompletionResponse>(&text) {
-            if let Some(err) = err_resp.error {
-                eprintln!("Error from OpenAI API ({}): {}", status, err.message);
+    let message =
+        match generate_commit_message(&diff_result.diff, model, &api_key, &base_url, temperature) {
+            Ok(message) => message,
+            Err(error) => {
+                eprintln!("Error: {error}");
                 exit(1);
             }
-        }
-        eprintln!(
-            "Error: OpenAI API request failed with status {}:\n{}",
-            status, text
-        );
-        exit(1);
-    }
-
-    let parsed: ChatCompletionResponse = match serde_json::from_str(&text) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Error: Failed to parse OpenAI response: {}", e);
-            exit(1);
-        }
-    };
-
-    let message = match parsed
-        .choices
-        .as_ref()
-        .and_then(|c| c.first())
-        .and_then(|choice| choice.message.content.as_ref())
-    {
-        Some(content) => content.trim().to_string(),
-        None => {
-            eprintln!("Error: Received empty response from OpenAI.");
-            exit(1);
-        }
-    };
+        };
 
     if auto_commit {
         println!(
