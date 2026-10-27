@@ -75,11 +75,21 @@ To make it permanent, add the export line above to your `~/.bashrc`, `~/.zshrc`,
 Launch `lazycommit-gui` (or run `cargo run --bin lazycommit-gui` from the source checkout) to choose a Git project folder. Open multiple projects as tabs; each keeps its own staging state, diff preview, and commit message. Pass a directory to open it directly, for example `lazycommit-gui .` or `cargo run --bin lazycommit-gui -- .`.
 
 The app organizes your workspace into three distinct staging sections:
-- **Staged Changes**: Review files currently in the Git index, unstage individual files with `－`, or unstage all with `－ Unstage all`.
-- **Changes**: Modified and deleted tracked files, with `＋` to stage individual files or `＋ Stage all`.
-- **Untracked Files**: Brand-new files, with `＋` to add them to the index or `＋ Stage all`.
+- **Staged Files**: Review files currently in the Git index, unstage individual files, or unstage all.
+- **Working Directory**: Modified and deleted tracked files, with options to stage, discard individual files, or stage/discard all.
+- **Untracked Files**: Brand-new files, with options to stage, delete individual files, or stage/delete all.
 
-Inspect diffs with syntax highlighting, click **`✦ Generate from Staged`** (or **`⚡ Stage All & Generate`**) to write your Conventional Commit message with AI, and click **`✓ Commit Staged`** to execute the commit. It uses the same `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_TEMPERATURE`, and `OPENAI_BASE_URL` environment variables as the CLI.
+### Sublime Merge Diff Experience
+The diff view features a Sublime Merge layout:
+- **Two-Column Line Numbers**: Side-by-side old and new line numbers gutter separated from code.
+- **Intra-Line Token Highlighting**: Automatically detects and highlights modified words and characters within changed lines.
+- **Natural Code Indentation**: Diff prefixes (`+` / `-`) are stripped so code keeps its original indentation.
+- **Hunk Actions**: Stage, unstage, or discard individual hunks directly from clean hunk header bars.
+- **File Headers & Folding**: Expand or collapse files, with Sublime Merge badges (`M`, `A`, `D`, `U`) and file actions.
+- **File Tabs**: Navigate between a Summary of all changes and individual file diffs.
+- **Light & Dark Themes**: Toggle seamlessly between dark mode and Sublime Merge light mode.
+
+Inspect diffs, click **`✦ Generate from Staged`** (or **`⚡ Stage All & Generate`**) to write your Conventional Commit message with AI, and click **`✓ Commit Staged`** to execute the commit. It uses the same `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_TEMPERATURE`, and `OPENAI_BASE_URL` environment variables as the CLI.
 
 The CLI remains available as `lazycommit`.
 

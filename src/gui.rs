@@ -1,9 +1,10 @@
 use eframe::egui;
 use lazycommit::{
-    collect_all_activity, detect_git_author, find_git_repos, format_activity_prompt,
+    collect_all_activity, detect_git_author, diff_view, find_git_repos, format_activity_prompt,
     generate_commit_message, generate_daily_report,
 };
 use std::{
+    collections::HashSet,
     env,
     path::{Path, PathBuf},
     process::Command,
@@ -19,6 +20,7 @@ enum SelectedFile {
 }
 
 impl SelectedFile {
+    #[allow(dead_code)]
     fn path(&self) -> &str {
         match self {
             SelectedFile::Staged(p) | SelectedFile::Unstaged(p) | SelectedFile::Untracked(p) => p,
@@ -57,6 +59,7 @@ struct WorkspaceTab {
     message: String,
     status: String,
     busy: bool,
+    collapsed_files: HashSet<String>,
 }
 
 enum WorkerResult {
@@ -86,6 +89,8 @@ pub struct LazyCommitApp {
     report_status: String,
     report_busy: bool,
     report_copied: bool,
+    pub light_mode: bool,
+    pub wrap_lines: bool,
 }
 
 impl Default for LazyCommitApp {
@@ -108,6 +113,8 @@ impl Default for LazyCommitApp {
             report_status: "Ready".into(),
             report_busy: false,
             report_copied: false,
+            light_mode: false,
+            wrap_lines: false,
         }
     }
 }
@@ -138,6 +145,7 @@ impl LazyCommitApp {
             message: String::new(),
             status: "Loading changes…".into(),
             busy: false,
+            collapsed_files: HashSet::new(),
         });
         self.active_tab = Some(id);
         self.refresh_tab(id);
@@ -162,6 +170,29 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn apply_patch(root: &Path, args: &[&str], patch: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Could not run git apply: {e}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(patch.as_bytes());
+    }
+    let output = child.wait_with_output().map_err(|e| format!("git apply error: {e}"))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if err.is_empty() { "Patch failed to apply".to_string() } else { err });
+    }
+    Ok(())
 }
 
 fn load_project(root: &Path) -> Result<ProjectState, String> {
@@ -254,11 +285,16 @@ fn get_diff_for_selection(root: &Path, selection: &SelectedFile) -> String {
             }
             match std::fs::read(&full_path) {
                 Ok(bytes) => match String::from_utf8(bytes) {
-                    Ok(text) => text
-                        .lines()
-                        .map(|l| format!("+{l}"))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
+                    Ok(text) => {
+                        let count = text.lines().count();
+                        let mut res = format!("diff --git a/{path} b/{path}\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{count} @@\n");
+                        for l in text.lines() {
+                            res.push('+');
+                            res.push_str(l);
+                            res.push('\n');
+                        }
+                        res
+                    }
                     Err(_) => "[Binary file: preview unavailable]".into(),
                 },
                 Err(e) => format!("[Could not read file: {e}]"),
@@ -426,6 +462,117 @@ impl LazyCommitApp {
                 .unwrap_or_default();
             let _ = tx.send(WorkerResult::Loaded(id, state));
             let _ = tx.send(WorkerResult::Generated(id, generate_message(diff)));
+        });
+    }
+
+    fn stage_hunk(&mut self, id: u64, patch: String) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            return;
+        };
+        let root = tab.project.clone();
+        let tx = self.tx.clone();
+        tab.busy = true;
+        tab.status = "Staging hunk…".into();
+        tab.cached_diff = None;
+        thread::spawn(move || {
+            let _ = apply_patch(&root, &["apply", "--cached", "--recount", "-"], &patch);
+            let _ = tx.send(WorkerResult::ActionDone(id));
+        });
+    }
+
+    fn unstage_hunk(&mut self, id: u64, patch: String) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            return;
+        };
+        let root = tab.project.clone();
+        let tx = self.tx.clone();
+        tab.busy = true;
+        tab.status = "Unstaging hunk…".into();
+        tab.cached_diff = None;
+        thread::spawn(move || {
+            let _ = apply_patch(&root, &["apply", "--cached", "--reverse", "--recount", "-"], &patch);
+            let _ = tx.send(WorkerResult::ActionDone(id));
+        });
+    }
+
+    fn discard_hunk(&mut self, id: u64, patch: String) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            return;
+        };
+        let root = tab.project.clone();
+        let tx = self.tx.clone();
+        tab.busy = true;
+        tab.status = "Discarding hunk…".into();
+        tab.cached_diff = None;
+        thread::spawn(move || {
+            let _ = apply_patch(&root, &["apply", "--reverse", "--recount", "-"], &patch);
+            let _ = tx.send(WorkerResult::ActionDone(id));
+        });
+    }
+
+    fn discard_file(&mut self, id: u64, path: String, is_untracked: bool) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            return;
+        };
+        let root = tab.project.clone();
+        let tx = self.tx.clone();
+        tab.busy = true;
+        tab.status = format!("Discarding {path}…");
+        tab.cached_diff = None;
+        thread::spawn(move || {
+            if is_untracked {
+                let full = root.join(&path);
+                if full.is_file() {
+                    let _ = std::fs::remove_file(full);
+                } else if full.is_dir() {
+                    let _ = std::fs::remove_dir_all(full);
+                }
+            } else {
+                let _ = Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(["restore", "--", &path])
+                    .output();
+            }
+            let _ = tx.send(WorkerResult::ActionDone(id));
+        });
+    }
+
+    fn discard_all_working(&mut self, id: u64) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            return;
+        };
+        let root = tab.project.clone();
+        let tx = self.tx.clone();
+        tab.busy = true;
+        tab.status = "Discarding all working tree changes…".into();
+        tab.cached_diff = None;
+        thread::spawn(move || {
+            let _ = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["restore", "."])
+                .output();
+            let _ = tx.send(WorkerResult::ActionDone(id));
+        });
+    }
+
+    fn delete_all_untracked(&mut self, id: u64) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            return;
+        };
+        let root = tab.project.clone();
+        let tx = self.tx.clone();
+        tab.busy = true;
+        tab.status = "Deleting all untracked files…".into();
+        tab.cached_diff = None;
+        thread::spawn(move || {
+            let _ = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["clean", "-fd"])
+                .output();
+            let _ = tx.send(WorkerResult::ActionDone(id));
         });
     }
 
@@ -675,36 +822,58 @@ impl eframe::App for LazyCommitApp {
         self.poll();
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
 
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = egui::Color32::from_rgb(17, 19, 24);
-        visuals.window_fill = egui::Color32::from_rgb(23, 26, 33);
-        visuals.faint_bg_color = egui::Color32::from_rgb(29, 33, 42);
-        visuals.extreme_bg_color = egui::Color32::from_rgb(13, 15, 19);
+        let visuals = if self.light_mode {
+            let mut v = egui::Visuals::light();
+            v.panel_fill = egui::Color32::from_rgb(246, 248, 252);
+            v.window_fill = egui::Color32::from_rgb(255, 255, 255);
+            v.faint_bg_color = egui::Color32::from_rgb(238, 241, 247);
+            v.extreme_bg_color = egui::Color32::from_rgb(255, 255, 255);
+            v.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(240, 243, 248);
+            v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(215, 222, 234));
+            v.widgets.inactive.bg_fill = egui::Color32::from_rgb(232, 236, 244);
+            v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(205, 212, 225));
+            v.widgets.hovered.bg_fill = egui::Color32::from_rgb(218, 225, 238);
+            v.widgets.active.bg_fill = egui::Color32::from_rgb(205, 215, 232);
+            v.selection.bg_fill = egui::Color32::from_rgb(195, 220, 255);
+            v
+        } else {
+            let mut v = egui::Visuals::dark();
+            v.panel_fill = egui::Color32::from_rgb(17, 19, 24);
+            v.window_fill = egui::Color32::from_rgb(23, 26, 33);
+            v.faint_bg_color = egui::Color32::from_rgb(29, 33, 42);
+            v.extreme_bg_color = egui::Color32::from_rgb(13, 15, 19);
 
-        visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(26, 30, 39);
-        visuals.widgets.noninteractive.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 48, 62));
-        visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(6);
+            v.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(26, 30, 39);
+            v.widgets.noninteractive.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 48, 62));
+            v.widgets.noninteractive.corner_radius = egui::CornerRadius::same(6);
 
-        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(31, 36, 47);
-        visuals.widgets.inactive.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 56, 73));
-        visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
+            v.widgets.inactive.bg_fill = egui::Color32::from_rgb(31, 36, 47);
+            v.widgets.inactive.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 56, 73));
+            v.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
 
-        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(44, 52, 68);
-        visuals.widgets.hovered.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(72, 85, 110));
-        visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
+            v.widgets.hovered.bg_fill = egui::Color32::from_rgb(44, 52, 68);
+            v.widgets.hovered.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(72, 85, 110));
+            v.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
 
-        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(52, 62, 82);
-        visuals.widgets.active.corner_radius = egui::CornerRadius::same(6);
+            v.widgets.active.bg_fill = egui::Color32::from_rgb(52, 62, 82);
+            v.widgets.active.corner_radius = egui::CornerRadius::same(6);
 
-        visuals.selection.bg_fill = egui::Color32::from_rgb(36, 72, 120);
-        visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 115, 185));
-        visuals.window_corner_radius = egui::CornerRadius::same(10);
-        visuals.window_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 56, 73));
-
+            v.selection.bg_fill = egui::Color32::from_rgb(36, 72, 120);
+            v.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 115, 185));
+            v.window_corner_radius = egui::CornerRadius::same(10);
+            v.window_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 56, 73));
+            v
+        };
         ctx.set_visuals(visuals);
+
+        let theme = if self.light_mode {
+            diff_view::DiffTheme::light()
+        } else {
+            diff_view::DiffTheme::dark()
+        };
 
         let available_size = root_ui.available_size();
         egui::Frame::central_panel(root_ui.style()).show(root_ui, |ui| {
@@ -781,6 +950,11 @@ impl eframe::App for LazyCommitApp {
                                 });
                                 if ui.add_enabled(!active_busy && self.active_tab.is_some(), refresh_btn).clicked() {
                                     refresh_tab = self.active_tab;
+                                }
+
+                                let theme_label = if self.light_mode { "☀ Light" } else { "🌙 Dark" };
+                                if ui.button(theme_label).on_hover_text("Toggle Light / Dark theme").clicked() {
+                                    self.light_mode = !self.light_mode;
                                 }
                             });
                         });
@@ -960,7 +1134,7 @@ impl eframe::App for LazyCommitApp {
                     return;
                 };
 
-                let (project, state, mut selected, mut message, status, busy, cached_diff) = {
+                let (project, state, mut selected, mut message, status, busy, cached_diff, mut collapsed_files) = {
                     let tab = &self.tabs[tab_index];
                     (
                         tab.project.clone(),
@@ -970,6 +1144,7 @@ impl eframe::App for LazyCommitApp {
                         tab.status.clone(),
                         tab.busy,
                         tab.cached_diff.clone(),
+                        tab.collapsed_files.clone(),
                     )
                 };
 
@@ -980,19 +1155,6 @@ impl eframe::App for LazyCommitApp {
                     .as_ref()
                     .map(|s| s.branch.clone())
                     .unwrap_or_else(|| "HEAD".into());
-
-                // Auto-select first item if current selection is none
-                if selected.is_none() {
-                    selected = if let Some(f) = staged.first() {
-                        Some(SelectedFile::Staged(f.path.clone()))
-                    } else if let Some(f) = unstaged.first() {
-                        Some(SelectedFile::Unstaged(f.path.clone()))
-                    } else if let Some(f) = untracked.first() {
-                        Some(SelectedFile::Untracked(f.path.clone()))
-                    } else {
-                        None
-                    };
-                }
 
                 // --- REPOSITORY SUMMARY BAR ---
                 egui::Frame::new()
@@ -1043,8 +1205,11 @@ impl eframe::App for LazyCommitApp {
 
                 let mut action_stage_file = None;
                 let mut action_unstage_file = None;
+                let mut action_discard_file = None;
                 let mut action_stage_all = false;
                 let mut action_unstage_all = false;
+                let mut action_discard_all = false;
+                let mut action_delete_all_untracked = false;
                 let mut action_stage_and_gen = false;
                 let mut generate_clicked = false;
                 let mut commit_clicked = false;
@@ -1052,8 +1217,8 @@ impl eframe::App for LazyCommitApp {
                 ui.horizontal(|ui| {
                     // --- LEFT PANE: STAGED / UNSTAGED / UNTRACKED FILES ---
                     egui::Frame::new()
-                        .fill(egui::Color32::from_rgb(22, 25, 33))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(38, 44, 58)))
+                        .fill(if self.light_mode { egui::Color32::from_rgb(240, 243, 248) } else { egui::Color32::from_rgb(22, 25, 33) })
+                        .stroke(egui::Stroke::new(1.0, if self.light_mode { egui::Color32::from_rgb(215, 222, 234) } else { egui::Color32::from_rgb(38, 44, 58) }))
                         .corner_radius(egui::CornerRadius::same(8))
                         .inner_margin(egui::Margin::symmetric(10, 10))
                         .show(ui, |ui| {
@@ -1067,16 +1232,16 @@ impl eframe::App for LazyCommitApp {
                                     .id_salt(("staging-files-scroll", active_id))
                                     .max_height(preview_height - 10.0)
                                     .show(ui, |ui| {
-                                        // 1. STAGED CHANGES
+                                        // 1. STAGED FILES
                                         ui.horizontal(|ui| {
                                             ui.label(
-                                                egui::RichText::new("STAGED CHANGES")
+                                                egui::RichText::new("STAGED FILES")
                                                     .strong()
                                                     .size(11.0)
-                                                    .color(egui::Color32::from_rgb(130, 215, 160)),
+                                                    .color(if self.light_mode { egui::Color32::from_rgb(25, 125, 55) } else { egui::Color32::from_rgb(130, 215, 160) }),
                                             );
                                             egui::Frame::new()
-                                                .fill(egui::Color32::from_rgb(25, 55, 38))
+                                                .fill(if self.light_mode { egui::Color32::from_rgb(220, 245, 225) } else { egui::Color32::from_rgb(25, 55, 38) })
                                                 .inner_margin(egui::Margin::symmetric(5, 1))
                                                 .corner_radius(egui::CornerRadius::same(6))
                                                 .show(ui, |ui| {
@@ -1084,35 +1249,32 @@ impl eframe::App for LazyCommitApp {
                                                         egui::RichText::new(staged.len().to_string())
                                                             .size(10.0)
                                                             .strong()
-                                                            .color(egui::Color32::from_rgb(140, 225, 170)),
+                                                            .color(if self.light_mode { egui::Color32::from_rgb(25, 125, 55) } else { egui::Color32::from_rgb(140, 225, 170) }),
                                                     );
                                                 });
 
                                             if !staged.is_empty() {
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    if ui.small_button("－ Unstage all")
-                                                        .on_hover_text("Unstage all files back to working directory")
-                                                        .clicked()
-                                                    {
+                                                    if diff_view::render_sublime_button(ui, &theme, "Unstage All", "Unstage all files back to working directory").clicked() {
                                                         action_unstage_all = true;
                                                     }
                                                 });
                                             }
                                         });
 
-                                        ui.add_space(2.0);
+                                        ui.add_space(3.0);
 
                                         if staged.is_empty() {
                                             ui.label(
-                                                egui::RichText::new("  No staged changes")
+                                                egui::RichText::new("  No staged files")
                                                     .size(11.0)
-                                                    .color(egui::Color32::from_rgb(120, 130, 145)),
+                                                    .color(theme.gutter_text_context),
                                             );
                                         } else {
                                             for file in &staged {
                                                 let is_active = selected == Some(SelectedFile::Staged(file.path.clone()));
                                                 let row_bg = if is_active {
-                                                    egui::Color32::from_rgb(34, 48, 42)
+                                                    if self.light_mode { egui::Color32::from_rgb(222, 232, 248) } else { egui::Color32::from_rgb(34, 48, 42) }
                                                 } else {
                                                     egui::Color32::TRANSPARENT
                                                 };
@@ -1123,25 +1285,13 @@ impl eframe::App for LazyCommitApp {
                                                     .corner_radius(egui::CornerRadius::same(4))
                                                     .show(ui, |ui| {
                                                         ui.horizontal(|ui| {
-                                                            if ui.small_button("－")
-                                                                .on_hover_text("Unstage file")
-                                                                .clicked()
-                                                            {
-                                                                action_unstage_file = Some(file.path.clone());
-                                                            }
-
-                                                            egui::Frame::new()
-                                                                .fill(egui::Color32::from_rgb(22, 55, 35))
-                                                                .corner_radius(egui::CornerRadius::same(4))
-                                                                .inner_margin(egui::Margin::symmetric(4, 1))
-                                                                .show(ui, |ui| {
-                                                                    ui.label(
-                                                                        egui::RichText::new(&file.status)
-                                                                            .strong()
-                                                                            .size(10.0)
-                                                                            .color(egui::Color32::from_rgb(80, 220, 150)),
-                                                                    );
-                                                                });
+                                                            let status_enum = match file.status.chars().next() {
+                                                                Some('A') => diff_view::DiffFileStatus::Added,
+                                                                Some('D') => diff_view::DiffFileStatus::Deleted,
+                                                                Some('R') => diff_view::DiffFileStatus::Renamed,
+                                                                _ => diff_view::DiffFileStatus::Modified,
+                                                            };
+                                                            diff_view::render_status_badge(ui, status_enum);
 
                                                             let path_str = &file.path;
                                                             let (dir_part, base_part) = match path_str.rfind('/') {
@@ -1153,18 +1303,19 @@ impl eframe::App for LazyCommitApp {
                                                                 ui.label(
                                                                     egui::RichText::new(dir_part)
                                                                         .size(10.0)
-                                                                        .color(egui::Color32::from_rgb(120, 130, 150)),
+                                                                        .color(theme.file_text_dir),
                                                                 );
                                                             }
-                                                            let text_color = if is_active {
-                                                                egui::Color32::WHITE
-                                                            } else {
-                                                                egui::Color32::from_rgb(210, 220, 235)
-                                                            };
-                                                            let click = ui.label(egui::RichText::new(base_part).strong().color(text_color));
+                                                            let click = ui.label(egui::RichText::new(base_part).strong().color(theme.file_text_name));
                                                             if click.clicked() {
                                                                 selected = Some(SelectedFile::Staged(file.path.clone()));
                                                             }
+
+                                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                                if ui.small_button("－").on_hover_text("Unstage file").clicked() {
+                                                                    action_unstage_file = Some(file.path.clone());
+                                                                }
+                                                            });
                                                         });
                                                     });
                                             }
@@ -1174,16 +1325,16 @@ impl eframe::App for LazyCommitApp {
                                         ui.separator();
                                         ui.add_space(6.0);
 
-                                        // 2. UNSTAGED CHANGES
+                                        // 2. WORKING DIRECTORY
                                         ui.horizontal(|ui| {
                                             ui.label(
-                                                egui::RichText::new("CHANGES")
+                                                egui::RichText::new("WORKING DIRECTORY")
                                                     .strong()
                                                     .size(11.0)
-                                                    .color(egui::Color32::from_rgb(140, 185, 235)),
+                                                    .color(if self.light_mode { egui::Color32::from_rgb(25, 95, 175) } else { egui::Color32::from_rgb(140, 185, 235) }),
                                             );
                                             egui::Frame::new()
-                                                .fill(egui::Color32::from_rgb(28, 42, 62))
+                                                .fill(if self.light_mode { egui::Color32::from_rgb(220, 235, 252) } else { egui::Color32::from_rgb(28, 42, 62) })
                                                 .inner_margin(egui::Margin::symmetric(5, 1))
                                                 .corner_radius(egui::CornerRadius::same(6))
                                                 .show(ui, |ui| {
@@ -1191,35 +1342,35 @@ impl eframe::App for LazyCommitApp {
                                                         egui::RichText::new(unstaged.len().to_string())
                                                             .size(10.0)
                                                             .strong()
-                                                            .color(egui::Color32::from_rgb(150, 195, 245)),
+                                                            .color(if self.light_mode { egui::Color32::from_rgb(25, 95, 175) } else { egui::Color32::from_rgb(150, 195, 245) }),
                                                     );
                                                 });
 
                                             if !unstaged.is_empty() {
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    if ui.small_button("＋ Stage all")
-                                                        .on_hover_text("Stage all modified tracked files")
-                                                        .clicked()
-                                                    {
+                                                    if diff_view::render_sublime_button(ui, &theme, "Stage All", "Stage all working directory changes").clicked() {
                                                         action_stage_all = true;
+                                                    }
+                                                    if diff_view::render_sublime_button(ui, &theme, "Discard All", "Discard all unstaged working directory changes").clicked() {
+                                                        action_discard_all = true;
                                                     }
                                                 });
                                             }
                                         });
 
-                                        ui.add_space(2.0);
+                                        ui.add_space(3.0);
 
                                         if unstaged.is_empty() {
                                             ui.label(
                                                 egui::RichText::new("  No unstaged changes")
                                                     .size(11.0)
-                                                    .color(egui::Color32::from_rgb(120, 130, 145)),
+                                                    .color(theme.gutter_text_context),
                                             );
                                         } else {
                                             for file in &unstaged {
                                                 let is_active = selected == Some(SelectedFile::Unstaged(file.path.clone()));
                                                 let row_bg = if is_active {
-                                                    egui::Color32::from_rgb(32, 42, 58)
+                                                    if self.light_mode { egui::Color32::from_rgb(222, 232, 248) } else { egui::Color32::from_rgb(32, 42, 58) }
                                                 } else {
                                                     egui::Color32::TRANSPARENT
                                                 };
@@ -1230,25 +1381,11 @@ impl eframe::App for LazyCommitApp {
                                                     .corner_radius(egui::CornerRadius::same(4))
                                                     .show(ui, |ui| {
                                                         ui.horizontal(|ui| {
-                                                            if ui.small_button("＋")
-                                                                .on_hover_text("Stage file")
-                                                                .clicked()
-                                                            {
-                                                                action_stage_file = Some(file.path.clone());
-                                                            }
-
-                                                            egui::Frame::new()
-                                                                .fill(egui::Color32::from_rgb(25, 45, 75))
-                                                                .corner_radius(egui::CornerRadius::same(4))
-                                                                .inner_margin(egui::Margin::symmetric(4, 1))
-                                                                .show(ui, |ui| {
-                                                                    ui.label(
-                                                                        egui::RichText::new(&file.status)
-                                                                            .strong()
-                                                                            .size(10.0)
-                                                                            .color(egui::Color32::from_rgb(100, 175, 255)),
-                                                                    );
-                                                                });
+                                                            let status_enum = match file.status.chars().next() {
+                                                                Some('D') => diff_view::DiffFileStatus::Deleted,
+                                                                _ => diff_view::DiffFileStatus::Modified,
+                                                            };
+                                                            diff_view::render_status_badge(ui, status_enum);
 
                                                             let path_str = &file.path;
                                                             let (dir_part, base_part) = match path_str.rfind('/') {
@@ -1260,18 +1397,22 @@ impl eframe::App for LazyCommitApp {
                                                                 ui.label(
                                                                     egui::RichText::new(dir_part)
                                                                         .size(10.0)
-                                                                        .color(egui::Color32::from_rgb(120, 130, 150)),
+                                                                        .color(theme.file_text_dir),
                                                                 );
                                                             }
-                                                            let text_color = if is_active {
-                                                                egui::Color32::WHITE
-                                                            } else {
-                                                                egui::Color32::from_rgb(210, 220, 235)
-                                                            };
-                                                            let click = ui.label(egui::RichText::new(base_part).strong().color(text_color));
+                                                            let click = ui.label(egui::RichText::new(base_part).strong().color(theme.file_text_name));
                                                             if click.clicked() {
                                                                 selected = Some(SelectedFile::Unstaged(file.path.clone()));
                                                             }
+
+                                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                                if ui.small_button("＋").on_hover_text("Stage file").clicked() {
+                                                                    action_stage_file = Some(file.path.clone());
+                                                                }
+                                                                if ui.small_button("✕").on_hover_text("Discard changes").clicked() {
+                                                                    action_discard_file = Some((file.path.clone(), false));
+                                                                }
+                                                            });
                                                         });
                                                     });
                                             }
@@ -1287,10 +1428,10 @@ impl eframe::App for LazyCommitApp {
                                                 egui::RichText::new("UNTRACKED FILES")
                                                     .strong()
                                                     .size(11.0)
-                                                    .color(egui::Color32::from_rgb(240, 190, 80)),
+                                                    .color(if self.light_mode { egui::Color32::from_rgb(180, 110, 20) } else { egui::Color32::from_rgb(240, 190, 80) }),
                                             );
                                             egui::Frame::new()
-                                                .fill(egui::Color32::from_rgb(55, 42, 18))
+                                                .fill(if self.light_mode { egui::Color32::from_rgb(254, 244, 222) } else { egui::Color32::from_rgb(55, 42, 18) })
                                                 .inner_margin(egui::Margin::symmetric(5, 1))
                                                 .corner_radius(egui::CornerRadius::same(6))
                                                 .show(ui, |ui| {
@@ -1298,35 +1439,35 @@ impl eframe::App for LazyCommitApp {
                                                         egui::RichText::new(untracked.len().to_string())
                                                             .size(10.0)
                                                             .strong()
-                                                            .color(egui::Color32::from_rgb(250, 195, 80)),
+                                                            .color(if self.light_mode { egui::Color32::from_rgb(180, 110, 20) } else { egui::Color32::from_rgb(250, 195, 80) }),
                                                     );
                                                 });
 
                                             if !untracked.is_empty() {
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    if ui.small_button("＋ Stage all")
-                                                        .on_hover_text("Stage all untracked files into git index")
-                                                        .clicked()
-                                                    {
+                                                    if diff_view::render_sublime_button(ui, &theme, "Stage All", "Stage all untracked files into git index").clicked() {
                                                         action_stage_all = true;
+                                                    }
+                                                    if diff_view::render_sublime_button(ui, &theme, "Delete All", "Delete all untracked files from disk").clicked() {
+                                                        action_delete_all_untracked = true;
                                                     }
                                                 });
                                             }
                                         });
 
-                                        ui.add_space(2.0);
+                                        ui.add_space(3.0);
 
                                         if untracked.is_empty() {
                                             ui.label(
                                                 egui::RichText::new("  No untracked files")
                                                     .size(11.0)
-                                                    .color(egui::Color32::from_rgb(120, 130, 145)),
+                                                    .color(theme.gutter_text_context),
                                             );
                                         } else {
                                             for file in &untracked {
                                                 let is_active = selected == Some(SelectedFile::Untracked(file.path.clone()));
                                                 let row_bg = if is_active {
-                                                    egui::Color32::from_rgb(46, 38, 22)
+                                                    if self.light_mode { egui::Color32::from_rgb(222, 232, 248) } else { egui::Color32::from_rgb(46, 38, 22) }
                                                 } else {
                                                     egui::Color32::TRANSPARENT
                                                 };
@@ -1337,25 +1478,7 @@ impl eframe::App for LazyCommitApp {
                                                     .corner_radius(egui::CornerRadius::same(4))
                                                     .show(ui, |ui| {
                                                         ui.horizontal(|ui| {
-                                                            if ui.small_button("＋")
-                                                                .on_hover_text("Stage untracked file")
-                                                                .clicked()
-                                                            {
-                                                                action_stage_file = Some(file.path.clone());
-                                                            }
-
-                                                            egui::Frame::new()
-                                                                .fill(egui::Color32::from_rgb(55, 40, 15))
-                                                                .corner_radius(egui::CornerRadius::same(4))
-                                                                .inner_margin(egui::Margin::symmetric(4, 1))
-                                                                .show(ui, |ui| {
-                                                                    ui.label(
-                                                                        egui::RichText::new("?")
-                                                                            .strong()
-                                                                            .size(10.0)
-                                                                            .color(egui::Color32::from_rgb(250, 190, 60)),
-                                                                    );
-                                                                });
+                                                            diff_view::render_status_badge(ui, diff_view::DiffFileStatus::Untracked);
 
                                                             let path_str = &file.path;
                                                             let (dir_part, base_part) = match path_str.rfind('/') {
@@ -1367,18 +1490,22 @@ impl eframe::App for LazyCommitApp {
                                                                 ui.label(
                                                                     egui::RichText::new(dir_part)
                                                                         .size(10.0)
-                                                                        .color(egui::Color32::from_rgb(120, 130, 150)),
+                                                                        .color(theme.file_text_dir),
                                                                 );
                                                             }
-                                                            let text_color = if is_active {
-                                                                egui::Color32::WHITE
-                                                            } else {
-                                                                egui::Color32::from_rgb(210, 220, 235)
-                                                            };
-                                                            let click = ui.label(egui::RichText::new(base_part).strong().color(text_color));
+                                                            let click = ui.label(egui::RichText::new(base_part).strong().color(theme.file_text_name));
                                                             if click.clicked() {
                                                                 selected = Some(SelectedFile::Untracked(file.path.clone()));
                                                             }
+
+                                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                                if ui.small_button("＋").on_hover_text("Stage untracked file").clicked() {
+                                                                    action_stage_file = Some(file.path.clone());
+                                                                }
+                                                                if ui.small_button("🗑").on_hover_text("Delete file from disk").clicked() {
+                                                                    action_discard_file = Some((file.path.clone(), true));
+                                                                }
+                                                            });
                                                         });
                                                     });
                                             }
@@ -1387,178 +1514,270 @@ impl eframe::App for LazyCommitApp {
                             });
                         });
 
-                    // --- RIGHT PANE: DIFF PREVIEW ---
+                    // --- RIGHT PANE: SUBLIME MERGE DIFF PREVIEW ---
                     egui::Frame::new()
-                        .fill(egui::Color32::from_rgb(18, 20, 26))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(38, 44, 58)))
+                        .fill(theme.bg_color)
+                        .stroke(egui::Stroke::new(1.0, theme.gutter_border))
                         .corner_radius(egui::CornerRadius::same(8))
-                        .inner_margin(egui::Margin::symmetric(12, 10))
+                        .inner_margin(egui::Margin::symmetric(10, 8))
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
                             ui.set_min_height(preview_height);
                             ui.set_max_height(preview_height);
 
                             ui.vertical(|ui| {
-                                let (title, badge_text, badge_color, badge_bg, can_stage, can_unstage) =
-                                    match &selected {
-                                        Some(SelectedFile::Staged(p)) => (
-                                            p.as_str(),
-                                            "STAGED",
-                                            egui::Color32::from_rgb(90, 220, 150),
-                                            egui::Color32::from_rgb(22, 55, 35),
-                                            false,
-                                            true,
-                                        ),
-                                        Some(SelectedFile::Unstaged(p)) => (
-                                            p.as_str(),
-                                            "UNSTAGED",
-                                            egui::Color32::from_rgb(110, 180, 255),
-                                            egui::Color32::from_rgb(25, 45, 75),
-                                            true,
-                                            false,
-                                        ),
-                                        Some(SelectedFile::Untracked(p)) => (
-                                            p.as_str(),
-                                            "UNTRACKED",
-                                            egui::Color32::from_rgb(250, 190, 60),
-                                            egui::Color32::from_rgb(55, 40, 15),
-                                            true,
-                                            false,
-                                        ),
-                                        None => (
-                                            "No file selected",
-                                            "DIFF",
-                                            egui::Color32::from_rgb(160, 170, 190),
-                                            egui::Color32::from_rgb(35, 40, 50),
-                                            false,
-                                            false,
-                                        ),
-                                    };
-
+                                // --- SUBLIME MERGE FILE TABS STRIP ---
                                 ui.horizontal(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(title)
-                                            .strong()
-                                            .color(egui::Color32::from_rgb(225, 232, 245)),
+                                    let tabs_width = (ui.available_width() - 110.0).max(100.0);
+                                    ui.allocate_ui_with_layout(
+                                        egui::Vec2::new(tabs_width, 28.0),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            egui::ScrollArea::horizontal()
+                                                .id_salt(("diff-tabs-scroll", active_id))
+                                                .max_height(28.0)
+                                                .show(ui, |ui| {
+                                                    ui.horizontal(|ui| {
+                                                        // Tab 1: Summary (All Changes)
+                                                        let is_summary_active = selected.is_none();
+                                                        let summary_bg = if is_summary_active {
+                                                            if self.light_mode { egui::Color32::from_rgb(220, 228, 242) } else { egui::Color32::from_rgb(38, 48, 68) }
+                                                        } else {
+                                                            egui::Color32::TRANSPARENT
+                                                        };
+                                                        let summary_color = if is_summary_active {
+                                                            if self.light_mode { egui::Color32::from_rgb(20, 25, 35) } else { egui::Color32::WHITE }
+                                                        } else {
+                                                            theme.gutter_text_context
+                                                        };
+
+                                                        egui::Frame::new()
+                                                            .fill(summary_bg)
+                                                            .corner_radius(egui::CornerRadius::same(4))
+                                                            .inner_margin(egui::Margin::symmetric(8, 3))
+                                                            .show(ui, |ui| {
+                                                                let click = ui.label(egui::RichText::new("Summary").size(11.0).strong().color(summary_color));
+                                                                if click.clicked() {
+                                                                    selected = None;
+                                                                }
+                                                            });
+
+                                                        // Tabs for Staged Files
+                                                        for f in &staged {
+                                                            let is_active = selected == Some(SelectedFile::Staged(f.path.clone()));
+                                                            let tab_bg = if is_active {
+                                                                if self.light_mode { egui::Color32::from_rgb(220, 228, 242) } else { egui::Color32::from_rgb(38, 48, 68) }
+                                                            } else {
+                                                                egui::Color32::TRANSPARENT
+                                                            };
+                                                            egui::Frame::new()
+                                                                .fill(tab_bg)
+                                                                .corner_radius(egui::CornerRadius::same(4))
+                                                                .inner_margin(egui::Margin::symmetric(6, 2))
+                                                                .show(ui, |ui| {
+                                                                    ui.horizontal(|ui| {
+                                                                        diff_view::render_status_badge(ui, diff_view::DiffFileStatus::Modified);
+                                                                        let base_name = f.path.rsplit('/').next().unwrap_or(&f.path);
+                                                                        let label_color = if is_active {
+                                                                            if self.light_mode { egui::Color32::from_rgb(20, 25, 35) } else { egui::Color32::WHITE }
+                                                                        } else {
+                                                                            theme.gutter_text_context
+                                                                        };
+                                                                        if ui.label(egui::RichText::new(base_name).size(11.0).color(label_color)).clicked() {
+                                                                            selected = Some(SelectedFile::Staged(f.path.clone()));
+                                                                        }
+                                                                    });
+                                                                });
+                                                        }
+
+                                                        // Tabs for Working Directory Files
+                                                        for f in &unstaged {
+                                                            let is_active = selected == Some(SelectedFile::Unstaged(f.path.clone()));
+                                                            let tab_bg = if is_active {
+                                                                if self.light_mode { egui::Color32::from_rgb(220, 228, 242) } else { egui::Color32::from_rgb(38, 48, 68) }
+                                                            } else {
+                                                                egui::Color32::TRANSPARENT
+                                                            };
+                                                            egui::Frame::new()
+                                                                .fill(tab_bg)
+                                                                .corner_radius(egui::CornerRadius::same(4))
+                                                                .inner_margin(egui::Margin::symmetric(6, 2))
+                                                                .show(ui, |ui| {
+                                                                    ui.horizontal(|ui| {
+                                                                        diff_view::render_status_badge(ui, diff_view::DiffFileStatus::Modified);
+                                                                        let base_name = f.path.rsplit('/').next().unwrap_or(&f.path);
+                                                                        let label_color = if is_active {
+                                                                            if self.light_mode { egui::Color32::from_rgb(20, 25, 35) } else { egui::Color32::WHITE }
+                                                                        } else {
+                                                                            theme.gutter_text_context
+                                                                        };
+                                                                        if ui.label(egui::RichText::new(base_name).size(11.0).color(label_color)).clicked() {
+                                                                            selected = Some(SelectedFile::Unstaged(f.path.clone()));
+                                                                        }
+                                                                    });
+                                                                });
+                                                        }
+
+                                                        // Tabs for Untracked Files
+                                                        for f in &untracked {
+                                                            let is_active = selected == Some(SelectedFile::Untracked(f.path.clone()));
+                                                            let tab_bg = if is_active {
+                                                                if self.light_mode { egui::Color32::from_rgb(220, 228, 242) } else { egui::Color32::from_rgb(38, 48, 68) }
+                                                            } else {
+                                                                egui::Color32::TRANSPARENT
+                                                            };
+                                                            egui::Frame::new()
+                                                                .fill(tab_bg)
+                                                                .corner_radius(egui::CornerRadius::same(4))
+                                                                .inner_margin(egui::Margin::symmetric(6, 2))
+                                                                .show(ui, |ui| {
+                                                                    ui.horizontal(|ui| {
+                                                                        diff_view::render_status_badge(ui, diff_view::DiffFileStatus::Untracked);
+                                                                        let base_name = f.path.rsplit('/').next().unwrap_or(&f.path);
+                                                                        let label_color = if is_active {
+                                                                            if self.light_mode { egui::Color32::from_rgb(20, 25, 35) } else { egui::Color32::WHITE }
+                                                                        } else {
+                                                                            theme.gutter_text_context
+                                                                        };
+                                                                        if ui.label(egui::RichText::new(base_name).size(11.0).color(label_color)).clicked() {
+                                                                            selected = Some(SelectedFile::Untracked(f.path.clone()));
+                                                                        }
+                                                                    });
+                                                                });
+                                                        }
+                                                    });
+                                                });
+                                        },
                                     );
 
-                                    egui::Frame::new()
-                                        .fill(badge_bg)
-                                        .corner_radius(egui::CornerRadius::same(4))
-                                        .inner_margin(egui::Margin::symmetric(6, 2))
-                                        .show(ui, |ui| {
-                                            ui.label(
-                                                egui::RichText::new(badge_text)
-                                                    .size(10.0)
-                                                    .strong()
-                                                    .color(badge_color),
-                                            );
-                                        });
+                                    let wrap_label = if self.wrap_lines { "↩ Wrap: ON" } else { "➡ Wrap: OFF" };
+                                    let wrap_btn = egui::Button::new(
+                                        egui::RichText::new(wrap_label)
+                                            .size(11.0)
+                                            .color(if self.wrap_lines {
+                                                if self.light_mode { egui::Color32::from_rgb(25, 125, 45) } else { egui::Color32::from_rgb(140, 230, 160) }
+                                            } else {
+                                                theme.gutter_text_context
+                                            }),
+                                    )
+                                    .fill(if self.wrap_lines {
+                                        if self.light_mode { egui::Color32::from_rgb(225, 245, 225) } else { egui::Color32::from_rgb(26, 48, 34) }
+                                    } else {
+                                        theme.btn_bg
+                                    })
+                                    .stroke(egui::Stroke::new(1.0, theme.btn_border))
+                                    .corner_radius(egui::CornerRadius::same(4))
+                                    .min_size(egui::Vec2::new(0.0, 22.0));
 
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if let Some(sel) = &selected {
-                                            let path = sel.path().to_string();
-                                            if can_stage {
-                                                let btn = egui::Button::new(
-                                                    egui::RichText::new("＋ Stage File").strong().color(egui::Color32::WHITE),
-                                                ).fill(egui::Color32::from_rgb(30, 95, 60));
-                                                if ui.add(btn).clicked() {
-                                                    action_stage_file = Some(path);
-                                                }
-                                            } else if can_unstage {
-                                                let btn = egui::Button::new(
-                                                    egui::RichText::new("－ Unstage File").color(egui::Color32::from_rgb(230, 235, 245)),
-                                                ).fill(egui::Color32::from_rgb(55, 65, 80));
-                                                if ui.add(btn).clicked() {
-                                                    action_unstage_file = Some(path);
-                                                }
-                                            }
-                                        }
-                                    });
+                                    if ui.add(wrap_btn).on_hover_text("Toggle line wrapping vs horizontal scrolling").clicked() {
+                                        self.wrap_lines = !self.wrap_lines;
+                                    }
                                 });
 
                                 ui.add_space(4.0);
                                 ui.separator();
                                 ui.add_space(4.0);
 
-                                // Compute or retrieve diff
-                                let shown_diff = match (&selected, &cached_diff) {
-                                    (Some(sel), Some((cached_sel, diff_str))) if sel == cached_sel => {
-                                        diff_str.clone()
+                                // Compute or retrieve parsed files for diff view
+                                let parsed_files = match &selected {
+                                    Some(SelectedFile::Staged(p)) => {
+                                        let diff_str = match &cached_diff {
+                                            Some((cached_sel, s)) if cached_sel == &SelectedFile::Staged(p.clone()) => s.clone(),
+                                            _ => {
+                                                let s = get_diff_for_selection(&project, &SelectedFile::Staged(p.clone()));
+                                                self.tabs[tab_index].cached_diff = Some((SelectedFile::Staged(p.clone()), s.clone()));
+                                                s
+                                            }
+                                        };
+                                        diff_view::parse_unified_diff(&diff_str, Some(p.as_str()), true, Some(diff_view::DiffFileStatus::Modified))
                                     }
-                                    (Some(sel), _) => {
-                                        let diff_str = get_diff_for_selection(&project, sel);
-                                        self.tabs[tab_index].cached_diff = Some((sel.clone(), diff_str.clone()));
-                                        diff_str
+                                    Some(SelectedFile::Unstaged(p)) => {
+                                        let diff_str = match &cached_diff {
+                                            Some((cached_sel, s)) if cached_sel == &SelectedFile::Unstaged(p.clone()) => s.clone(),
+                                            _ => {
+                                                let s = get_diff_for_selection(&project, &SelectedFile::Unstaged(p.clone()));
+                                                self.tabs[tab_index].cached_diff = Some((SelectedFile::Unstaged(p.clone()), s.clone()));
+                                                s
+                                            }
+                                        };
+                                        diff_view::parse_unified_diff(&diff_str, Some(p.as_str()), false, Some(diff_view::DiffFileStatus::Modified))
                                     }
-                                    (None, _) => {
-                                        if !staged.is_empty() {
-                                            state.as_ref().map(|s| s.staged_diff.clone()).unwrap_or_default()
-                                        } else {
-                                            state.as_ref().map(|s| s.unstaged_diff.clone()).unwrap_or_default()
+                                    Some(SelectedFile::Untracked(p)) => {
+                                        let diff_str = match &cached_diff {
+                                            Some((cached_sel, s)) if cached_sel == &SelectedFile::Untracked(p.clone()) => s.clone(),
+                                            _ => {
+                                                let s = get_diff_for_selection(&project, &SelectedFile::Untracked(p.clone()));
+                                                self.tabs[tab_index].cached_diff = Some((SelectedFile::Untracked(p.clone()), s.clone()));
+                                                s
+                                            }
+                                        };
+                                        diff_view::parse_unified_diff(&diff_str, Some(p.as_str()), false, Some(diff_view::DiffFileStatus::Untracked))
+                                    }
+                                    None => {
+                                        // Summary view: combine all files
+                                        let mut files = Vec::new();
+                                        if let Some(s) = &state {
+                                            if !s.staged_diff.is_empty() {
+                                                files.extend(diff_view::parse_unified_diff(&s.staged_diff, None, true, Some(diff_view::DiffFileStatus::Modified)));
+                                            }
+                                            if !s.unstaged_diff.is_empty() {
+                                                files.extend(diff_view::parse_unified_diff(&s.unstaged_diff, None, false, Some(diff_view::DiffFileStatus::Modified)));
+                                            }
+                                            for u in &s.untracked {
+                                                let diff_str = get_diff_for_selection(&project, &SelectedFile::Untracked(u.path.clone()));
+                                                files.extend(diff_view::parse_unified_diff(&diff_str, Some(&u.path), false, Some(diff_view::DiffFileStatus::Untracked)));
+                                            }
                                         }
+                                        files
                                     }
                                 };
 
-                                let display_text = if shown_diff.trim().is_empty() {
-                                    "No changes detected or select a file from the left to view diff."
+                                let mut diff_actions = Vec::new();
+                                let scroll_area = if self.wrap_lines {
+                                    egui::ScrollArea::vertical()
                                 } else {
-                                    &shown_diff
+                                    egui::ScrollArea::both()
                                 };
-
-                                egui::ScrollArea::both()
-                                    .id_salt(("diff-preview-scroll", active_id))
-                                    .max_height(preview_height - 65.0)
+                                scroll_area
+                                    .id_salt(("sublime-diff-scroll", active_id))
+                                    .max_height(preview_height - 50.0)
+                                    .auto_shrink([false, false])
                                     .show(ui, |ui| {
                                         ui.vertical(|ui| {
-                                            for line in display_text.lines() {
-                                                let (text_color, bg_color) = if line.starts_with("+++")
-                                                    || line.starts_with("---")
-                                                {
-                                                    (
-                                                        egui::Color32::from_rgb(180, 188, 200),
-                                                        Some(egui::Color32::from_rgba_premultiplied(40, 45, 55, 120)),
-                                                    )
-                                                } else if line.starts_with('+') {
-                                                    (
-                                                        egui::Color32::from_rgb(145, 225, 165),
-                                                        Some(egui::Color32::from_rgba_premultiplied(25, 65, 38, 90)),
-                                                    )
-                                                } else if line.starts_with('-') {
-                                                    (
-                                                        egui::Color32::from_rgb(245, 140, 140),
-                                                        Some(egui::Color32::from_rgba_premultiplied(75, 25, 25, 90)),
-                                                    )
-                                                } else if line.starts_with('@') {
-                                                    (
-                                                        egui::Color32::from_rgb(125, 195, 240),
-                                                        Some(egui::Color32::from_rgba_premultiplied(28, 45, 70, 120)),
-                                                    )
-                                                } else {
-                                                    (egui::Color32::from_rgb(205, 212, 222), None)
-                                                };
-
-                                                let frame = egui::Frame::new()
-                                                    .fill(bg_color.unwrap_or(egui::Color32::TRANSPARENT))
-                                                    .inner_margin(egui::Margin::symmetric(4, 1))
-                                                    .corner_radius(egui::CornerRadius::same(2));
-
-                                                frame.show(ui, |ui| {
-                                                    ui.label(
-                                                        egui::RichText::new(line)
-                                                            .monospace()
-                                                            .size(12.0)
-                                                            .color(text_color),
-                                                    );
-                                                });
-                                            }
+                                            diff_view::render_diff_view(
+                                                ui,
+                                                &theme,
+                                                &parsed_files,
+                                                &collapsed_files,
+                                                self.wrap_lines,
+                                                &mut diff_actions,
+                                            );
                                         });
                                     });
+
+                                for action in diff_actions {
+                                    match action {
+                                        diff_view::DiffAction::StageFile(p) => action_stage_file = Some(p),
+                                        diff_view::DiffAction::UnstageFile(p) => action_unstage_file = Some(p),
+                                        diff_view::DiffAction::DiscardFile(p, is_untracked) => action_discard_file = Some((p, is_untracked)),
+                                        diff_view::DiffAction::StageHunk(patch) => self.stage_hunk(active_id, patch),
+                                        diff_view::DiffAction::UnstageHunk(patch) => self.unstage_hunk(active_id, patch),
+                                        diff_view::DiffAction::DiscardHunk(patch) => self.discard_hunk(active_id, patch),
+                                        diff_view::DiffAction::ToggleCollapse(p) => {
+                                            if collapsed_files.contains(&p) {
+                                                collapsed_files.remove(&p);
+                                            } else {
+                                                collapsed_files.insert(p);
+                                            }
+                                        }
+                                    }
+                                }
                             });
                         });
                 });
 
                 self.tabs[tab_index].selected_file = selected;
+                self.tabs[tab_index].collapsed_files = collapsed_files;
 
                 ui.add_space(6.0);
 
@@ -1690,11 +1909,20 @@ impl eframe::App for LazyCommitApp {
                 if let Some(path) = action_unstage_file {
                     self.unstage_file(active_id, path);
                 }
+                if let Some((path, is_untracked)) = action_discard_file {
+                    self.discard_file(active_id, path, is_untracked);
+                }
                 if action_stage_all {
                     self.stage_all(active_id);
                 }
                 if action_unstage_all {
                     self.unstage_all(active_id);
+                }
+                if action_discard_all {
+                    self.discard_all_working(active_id);
+                }
+                if action_delete_all_untracked {
+                    self.delete_all_untracked(active_id);
                 }
                 if action_stage_and_gen {
                     self.stage_all_and_generate(active_id);

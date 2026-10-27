@@ -1,4 +1,5 @@
 pub mod report;
+pub mod diff_view;
 
 pub use report::{
     collect_all_activity, collect_repo_commits, detect_git_author, find_git_repos,
