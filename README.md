@@ -72,7 +72,14 @@ To make it permanent, add the export line above to your `~/.bashrc`, `~/.zshrc`,
 
 ### Native desktop app
 
-Launch `lazycommit-gui` (or run `cargo run --bin lazycommit-gui` from the source checkout) to choose a Git project folder. Open multiple projects as tabs; each keeps its own diff, selected file, status, and commit message. Pass a directory to open it directly, for example `lazycommit-gui .` or `cargo run --bin lazycommit-gui -- .`. The app shows the changed-file list and diff, then lets you generate and edit a message. It only runs `git commit` when you press **Commit**. It uses the same `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_TEMPERATURE`, and `OPENAI_BASE_URL` environment variables as the CLI. Untracked files are shown as a reminder and must be staged before they can be included.
+Launch `lazycommit-gui` (or run `cargo run --bin lazycommit-gui` from the source checkout) to choose a Git project folder. Open multiple projects as tabs; each keeps its own staging state, diff preview, and commit message. Pass a directory to open it directly, for example `lazycommit-gui .` or `cargo run --bin lazycommit-gui -- .`.
+
+The app organizes your workspace into three distinct staging sections:
+- **Staged Changes**: Review files currently in the Git index, unstage individual files with `－`, or unstage all with `－ Unstage all`.
+- **Changes**: Modified and deleted tracked files, with `＋` to stage individual files or `＋ Stage all`.
+- **Untracked Files**: Brand-new files, with `＋` to add them to the index or `＋ Stage all`.
+
+Inspect diffs with syntax highlighting, click **`✦ Generate from Staged`** (or **`⚡ Stage All & Generate`**) to write your Conventional Commit message with AI, and click **`✓ Commit Staged`** to execute the commit. It uses the same `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_TEMPERATURE`, and `OPENAI_BASE_URL` environment variables as the CLI.
 
 The CLI remains available as `lazycommit`.
 
