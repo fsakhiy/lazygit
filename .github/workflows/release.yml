@@ -19,25 +19,21 @@ jobs:
           # Universal Linux (Fedora, Arch, Debian, Ubuntu, etc.)
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            artifact_name: lazycommit
             asset_name: lazycommit-x86_64-linux.tar.gz
 
           # Windows x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: lazycommit.exe
             asset_name: lazycommit-x86_64-windows.zip
 
           # macOS Apple Silicon (M1/M2/M3/M4)
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: lazycommit
             asset_name: lazycommit-aarch64-macos.tar.gz
 
           # macOS Intel
           - os: macos-13
             target: x86_64-apple-darwin
-            artifact_name: lazycommit
             asset_name: lazycommit-x86_64-macos.tar.gz
 
     steps:
@@ -61,7 +57,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.asset_name }} ${{ matrix.artifact_name }}
+          tar czf ../../../${{ matrix.asset_name }} lazycommit lazycommit-gui lazyreport
           cd ../../..
         shell: bash
 
@@ -69,7 +65,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          Compress-Archive -Path ${{ matrix.artifact_name }} -DestinationPath ../../../${{ matrix.asset_name }}
+          Compress-Archive -Path lazycommit.exe,lazycommit-gui.exe,lazyreport.exe -DestinationPath ../../../${{ matrix.asset_name }}
           cd ../../..
         shell: pwsh
 
