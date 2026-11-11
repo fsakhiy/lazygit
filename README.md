@@ -72,7 +72,7 @@ To make it permanent, add the export line above to your `~/.bashrc`, `~/.zshrc`,
 
 ### Native desktop app
 
-Launch `lazycommit-gui` (or run `cargo run --bin lazycommit-gui` from the source checkout) to choose a Git project folder. Open multiple projects as tabs; each keeps its own staging state, diff preview, and commit message. Pass a directory to open it directly, for example `lazycommit-gui .` or `cargo run --bin lazycommit-gui -- .`.
+Launch `lazycommit-gui` (or run `cargo run --bin lazycommit-gui` from the source checkout) to choose a Git project folder. Open multiple projects as tabs; each keeps its own staging state, diff preview, and commit message. Pass a directory to open it directly, for example `lazycommit-gui .` or `cargo run --bin lazycommit-gui -- .`. Use `--help` for usage or `--version` to print the version.
 
 The app organizes your workspace into three distinct staging sections:
 - **Staged Files**: Review files currently in the Git index, unstage individual files, or unstage all.

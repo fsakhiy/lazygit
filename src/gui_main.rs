@@ -12,6 +12,27 @@ fn main() -> eframe::Result {
         std::process::exit(2);
     }
 
+    match arg.to_str() {
+        Some("-h" | "--help") => {
+            println!(
+                "lazycommit-gui: native desktop app for reviewing diffs and generating commit messages\n\n\
+USAGE:\n    \
+lazycommit-gui [PROJECT_DIRECTORY]\n\n\
+ARGS:\n    \
+PROJECT_DIRECTORY    Optional path to a Git repository to open on launch\n\n\
+OPTIONS:\n    \
+-h, --help           Print help information\n    \
+-v, --version        Print version information"
+            );
+            return Ok(());
+        }
+        Some("-v" | "--version") => {
+            println!("lazycommit-gui {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        _ => {}
+    }
+
     let supplied_path = PathBuf::from(arg);
     let path = match supplied_path.canonicalize() {
         Ok(path) if path.is_dir() => path,
