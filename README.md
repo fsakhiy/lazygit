@@ -10,7 +10,7 @@ The project also includes a native desktop app for selecting a repository, revie
 
 - **Automated Commit Messages**: Analyzes git changes and infers concise Conventional Commit messages (`feat:`, `fix:`, `refactor:`, `chore:`, etc.).
 - **Auto-Commit Option (`-c` / `--commit`)**: Generates the commit message and automatically executes `git commit` in one step.
-- **Daily End-of-Day (EOD) Reports**: Scans across multiple repositories for committed work and uses OpenAI to write a boss-ready daily report (`lazyreport` binary and in `lazycommit-gui`).
+- **Daily End-of-Day (EOD) Reports**: Scans across multiple repositories for committed work and uses OpenAI to write a concise, technical daily report (`lazyreport` binary and in `lazycommit-gui`).
 - **Smart Diff Inspection**:
   - Prioritizes **staged changes** (`git diff --staged`).
   - Automatically falls back to **unstaged modifications** if nothing is staged.

@@ -3,9 +3,10 @@ use lazycommit::{
     collect_all_activity, detect_git_author, diff_view, find_git_repos, format_activity_prompt,
     generate_commit_message, generate_daily_report,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
-    env,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
     sync::mpsc::{self, Receiver, Sender},
@@ -42,6 +43,7 @@ struct ProjectState {
     staged_diff: String,
     unstaged_diff: String,
     branch: String,
+    ahead_count: usize,
 }
 
 impl ProjectState {
@@ -66,6 +68,7 @@ enum WorkerResult {
     Loaded(u64, Result<ProjectState, String>),
     Generated(u64, Result<String, String>),
     Committed(u64, Result<String, String>),
+    Pushed(u64, Result<String, String>),
     ActionDone(u64),
     ReportLoaded(Result<String, String>),
     ReportGenerated(Result<String, String>),
@@ -114,23 +117,144 @@ impl Default for LazyCommitApp {
             report_busy: false,
             report_copied: false,
             light_mode: false,
-            wrap_lines: false,
+            wrap_lines: true,
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+struct SavedSession {
+    #[serde(default)]
+    open_projects: Vec<PathBuf>,
+    #[serde(default)]
+    active_project: Option<PathBuf>,
+    #[serde(default)]
+    light_mode: Option<bool>,
+    #[serde(default)]
+    wrap_lines: Option<bool>,
+}
+
+fn get_session_file_path() -> Option<PathBuf> {
+    if let Ok(config_home) = env::var("XDG_CONFIG_HOME")
+        && !config_home.trim().is_empty()
+    {
+        return Some(
+            PathBuf::from(config_home)
+                .join("lazycommit")
+                .join("session.json"),
+        );
+    }
+    if let Ok(home) = env::var("HOME")
+        && !home.trim().is_empty()
+    {
+        return Some(
+            PathBuf::from(home)
+                .join(".config")
+                .join("lazycommit")
+                .join("session.json"),
+        );
+    }
+    #[cfg(windows)]
+    if let Ok(appdata) = env::var("APPDATA")
+        && !appdata.trim().is_empty()
+    {
+        return Some(
+            PathBuf::from(appdata)
+                .join("lazycommit")
+                .join("session.json"),
+        );
+    }
+    None
+}
+
+fn load_saved_session() -> Option<SavedSession> {
+    let path = get_session_file_path()?;
+    let content = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
 }
 
 impl LazyCommitApp {
     pub fn with_project(project: Option<PathBuf>) -> Self {
         let mut app = Self::default();
+        let saved = load_saved_session();
+
+        if let Some(ref session) = saved {
+            if let Some(light) = session.light_mode {
+                app.light_mode = light;
+            }
+            if let Some(wrap) = session.wrap_lines {
+                app.wrap_lines = wrap;
+            }
+
+            for p in &session.open_projects {
+                if p.is_dir() {
+                    app.open_project_internal(p.clone(), false);
+                }
+            }
+
+            if let Some(ref active) = session.active_project {
+                let canonical_active = active.canonicalize().unwrap_or_else(|_| active.clone());
+                if let Some(tab) = app
+                    .tabs
+                    .iter()
+                    .find(|t| t.project == *active || t.project == canonical_active)
+                {
+                    app.active_tab = Some(tab.id);
+                }
+            }
+            if app.active_tab.is_none() {
+                app.active_tab = app.tabs.last().map(|t| t.id);
+            }
+        }
+
         if let Some(project) = project {
             app.open_project(project);
         }
+
+        app.save_session();
         app
     }
 
+    fn save_session(&self) {
+        let Some(path) = get_session_file_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let open_projects: Vec<PathBuf> = self.tabs.iter().map(|t| t.project.clone()).collect();
+        let active_project = self.active_tab.and_then(|id| {
+            self.tabs
+                .iter()
+                .find(|t| t.id == id)
+                .map(|t| t.project.clone())
+        });
+        let session = SavedSession {
+            open_projects,
+            active_project,
+            light_mode: Some(self.light_mode),
+            wrap_lines: Some(self.wrap_lines),
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&session) {
+            let _ = fs::write(path, json);
+        }
+    }
+
     fn open_project(&mut self, project: PathBuf) {
-        if let Some(existing) = self.tabs.iter().find(|t| t.project == project) {
+        self.open_project_internal(project, true);
+    }
+
+    fn open_project_internal(&mut self, project: PathBuf, save: bool) {
+        let canonical = project.canonicalize().unwrap_or_else(|_| project.clone());
+        if let Some(existing) = self
+            .tabs
+            .iter()
+            .find(|t| t.project == project || t.project == canonical)
+        {
             self.active_tab = Some(existing.id);
+            if save {
+                self.save_session();
+            }
             return;
         }
 
@@ -138,7 +262,7 @@ impl LazyCommitApp {
         self.next_tab_id += 1;
         self.tabs.push(WorkspaceTab {
             id,
-            project,
+            project: canonical,
             state: None,
             selected_file: None,
             cached_diff: None,
@@ -149,6 +273,9 @@ impl LazyCommitApp {
         });
         self.active_tab = Some(id);
         self.refresh_tab(id);
+        if save {
+            self.save_session();
+        }
     }
 
     fn close_tab(&mut self, id: u64) {
@@ -156,6 +283,7 @@ impl LazyCommitApp {
         if self.active_tab == Some(id) {
             self.active_tab = self.tabs.last().map(|tab| tab.id);
         }
+        self.save_session();
     }
 }
 
@@ -187,10 +315,16 @@ fn apply_patch(root: &Path, args: &[&str], patch: &str) -> Result<(), String> {
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(patch.as_bytes());
     }
-    let output = child.wait_with_output().map_err(|e| format!("git apply error: {e}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("git apply error: {e}"))?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if err.is_empty() { "Patch failed to apply".to_string() } else { err });
+        return Err(if err.is_empty() {
+            "Patch failed to apply".to_string()
+        } else {
+            err
+        });
     }
     Ok(())
 }
@@ -244,6 +378,10 @@ fn load_project(root: &Path) -> Result<ProjectState, String> {
 
     let staged_diff = git(root, &["diff", "--cached", "--"]).unwrap_or_default();
     let unstaged_diff = git(root, &["diff", "--"]).unwrap_or_default();
+    let ahead_count = git(root, &["rev-list", "--count", "@{u}..HEAD"])
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0);
 
     Ok(ProjectState {
         staged,
@@ -256,6 +394,7 @@ fn load_project(root: &Path) -> Result<ProjectState, String> {
         } else {
             branch
         },
+        ahead_count,
     })
 }
 
@@ -287,7 +426,9 @@ fn get_diff_for_selection(root: &Path, selection: &SelectedFile) -> String {
                 Ok(bytes) => match String::from_utf8(bytes) {
                     Ok(text) => {
                         let count = text.lines().count();
-                        let mut res = format!("diff --git a/{path} b/{path}\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{count} @@\n");
+                        let mut res = format!(
+                            "diff --git a/{path} b/{path}\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{count} @@\n"
+                        );
                         for l in text.lines() {
                             res.push('+');
                             res.push_str(l);
@@ -490,7 +631,11 @@ impl LazyCommitApp {
         tab.status = "Unstaging hunk…".into();
         tab.cached_diff = None;
         thread::spawn(move || {
-            let _ = apply_patch(&root, &["apply", "--cached", "--reverse", "--recount", "-"], &patch);
+            let _ = apply_patch(
+                &root,
+                &["apply", "--cached", "--reverse", "--recount", "-"],
+                &patch,
+            );
             let _ = tx.send(WorkerResult::ActionDone(id));
         });
     }
@@ -586,16 +731,21 @@ impl LazyCommitApp {
                             Ok(state) => {
                                 let total = state.total_changes();
                                 let staged_count = state.staged.len();
-                                tab.status = format!(
-                                    "{total} change(s) ({staged_count} staged)"
-                                );
+                                tab.status = format!("{total} change(s) ({staged_count} staged)");
 
                                 // Keep selected file if it still exists, otherwise auto-select first available
-                                let current_selection_valid = tab.selected_file.as_ref().is_some_and(|sel| match sel {
-                                    SelectedFile::Staged(p) => state.staged.iter().any(|f| &f.path == p),
-                                    SelectedFile::Unstaged(p) => state.unstaged.iter().any(|f| &f.path == p),
-                                    SelectedFile::Untracked(p) => state.untracked.iter().any(|f| &f.path == p),
-                                });
+                                let current_selection_valid =
+                                    tab.selected_file.as_ref().is_some_and(|sel| match sel {
+                                        SelectedFile::Staged(p) => {
+                                            state.staged.iter().any(|f| &f.path == p)
+                                        }
+                                        SelectedFile::Unstaged(p) => {
+                                            state.unstaged.iter().any(|f| &f.path == p)
+                                        }
+                                        SelectedFile::Untracked(p) => {
+                                            state.untracked.iter().any(|f| &f.path == p)
+                                        }
+                                    });
 
                                 if !current_selection_valid {
                                     tab.selected_file = if let Some(f) = state.staged.first() {
@@ -626,7 +776,8 @@ impl LazyCommitApp {
                             Ok(message) => {
                                 tab.message = message;
                                 tab.status =
-                                    "Commit message generated! Review and commit when ready.".into();
+                                    "Commit message generated! Review and commit when ready."
+                                        .into();
                             }
                             Err(error) => tab.status = error,
                         }
@@ -647,6 +798,22 @@ impl LazyCommitApp {
                                 self.refresh_tab(id);
                             }
                             Err(error) => tab.status = error,
+                        }
+                    }
+                }
+                WorkerResult::Pushed(id, result) => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                        tab.busy = false;
+                        match result {
+                            Ok(output) => {
+                                tab.status = if output.trim().is_empty() {
+                                    "Pushed commits successfully.".into()
+                                } else {
+                                    format!("Push successful: {}", output.trim())
+                                };
+                                self.refresh_tab(id);
+                            }
+                            Err(error) => tab.status = format!("Push failed: {error}"),
                         }
                     }
                 }
@@ -685,7 +852,9 @@ impl LazyCommitApp {
                 if let Some(folder) = &self.report_folder {
                     find_git_repos(&[folder.clone()])
                 } else {
-                    find_git_repos(&[std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))])
+                    find_git_repos(
+                        &[std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))],
+                    )
                 }
             } else {
                 tab_repos
@@ -749,9 +918,11 @@ impl LazyCommitApp {
                 return;
             }
             let model = env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-6-luna".into());
-            let base_url = env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".into());
-            let temperature = env::var("OPENAI_TEMPERATURE").ok().and_then(|v| v.parse().ok());
+            let base_url =
+                env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".into());
+            let temperature = env::var("OPENAI_TEMPERATURE")
+                .ok()
+                .and_then(|v| v.parse().ok());
 
             let res = generate_daily_report(&prompt, model, &key, &base_url, temperature);
             let _ = tx.send(WorkerResult::ReportGenerated(res));
@@ -814,6 +985,87 @@ impl LazyCommitApp {
             let _ = tx.send(WorkerResult::Committed(id, output));
         });
     }
+
+    fn push_tab(&mut self, id: u64) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            return;
+        };
+        let root = tab.project.clone();
+        let branch = tab
+            .state
+            .as_ref()
+            .map(|s| s.branch.clone())
+            .unwrap_or_default();
+        let tx = self.tx.clone();
+        tab.busy = true;
+        tab.status = "Executing git push…".into();
+        thread::spawn(move || {
+            let mut command = Command::new("git");
+            command.arg("-C").arg(&root).arg("push");
+            let output = command.output();
+
+            let result = match output {
+                Ok(out) if out.status.success() => {
+                    let stdout_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    let stderr_str = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    let msg = if !stderr_str.is_empty() {
+                        stderr_str
+                    } else if !stdout_str.is_empty() {
+                        stdout_str
+                    } else {
+                        "Everything up-to-date".into()
+                    };
+                    Ok(msg)
+                }
+                Ok(out) => {
+                    let stderr_str = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    let stdout_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    let combined_err = format!("{stderr_str}\n{stdout_str}").trim().to_string();
+
+                    // If failed because no upstream is configured, try `git push -u origin <branch>`
+                    if (combined_err.contains("no upstream branch")
+                        || combined_err.contains("--set-upstream"))
+                        && !branch.is_empty()
+                        && branch != "HEAD"
+                    {
+                        let mut retry_cmd = Command::new("git");
+                        retry_cmd
+                            .arg("-C")
+                            .arg(&root)
+                            .args(["push", "-u", "origin", &branch]);
+                        if let Ok(retry_out) = retry_cmd.output() {
+                            if retry_out.status.success() {
+                                let retry_err = String::from_utf8_lossy(&retry_out.stderr)
+                                    .trim()
+                                    .to_string();
+                                let retry_out_str = String::from_utf8_lossy(&retry_out.stdout)
+                                    .trim()
+                                    .to_string();
+                                let msg = if !retry_err.is_empty() {
+                                    retry_err
+                                } else {
+                                    retry_out_str
+                                };
+                                Ok(format!("Pushed & set upstream origin/{branch}: {msg}"))
+                            } else {
+                                let err = String::from_utf8_lossy(&retry_out.stderr)
+                                    .trim()
+                                    .to_string();
+                                Err(err)
+                            }
+                        } else {
+                            Err(combined_err)
+                        }
+                    } else {
+                        Err(combined_err)
+                    }
+                }
+                Err(e) => Err(format!("Could not run git push: {e}")),
+            };
+
+            let _ = tx.send(WorkerResult::Pushed(id, result));
+        });
+    }
 }
 
 impl eframe::App for LazyCommitApp {
@@ -829,9 +1081,11 @@ impl eframe::App for LazyCommitApp {
             v.faint_bg_color = egui::Color32::from_rgb(238, 241, 247);
             v.extreme_bg_color = egui::Color32::from_rgb(255, 255, 255);
             v.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(240, 243, 248);
-            v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(215, 222, 234));
+            v.widgets.noninteractive.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(215, 222, 234));
             v.widgets.inactive.bg_fill = egui::Color32::from_rgb(232, 236, 244);
-            v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(205, 212, 225));
+            v.widgets.inactive.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(205, 212, 225));
             v.widgets.hovered.bg_fill = egui::Color32::from_rgb(218, 225, 238);
             v.widgets.active.bg_fill = egui::Color32::from_rgb(205, 215, 232);
             v.selection.bg_fill = egui::Color32::from_rgb(195, 220, 255);
@@ -955,6 +1209,7 @@ impl eframe::App for LazyCommitApp {
                                 let theme_label = if self.light_mode { "☀ Light" } else { "🌙 Dark" };
                                 if ui.button(theme_label).on_hover_text("Toggle Light / Dark theme").clicked() {
                                     self.light_mode = !self.light_mode;
+                                    self.save_session();
                                 }
                             });
                         });
@@ -1060,8 +1315,11 @@ impl eframe::App for LazyCommitApp {
                     ui.add_space(6.0);
                 }
 
-                if let Some(id) = activate_tab {
+                if let Some(id) = activate_tab
+                    && self.active_tab != Some(id)
+                {
                     self.active_tab = Some(id);
+                    self.save_session();
                 }
                 if let Some(id) = close_tab {
                     self.close_tab(id);
@@ -1155,25 +1413,28 @@ impl eframe::App for LazyCommitApp {
                     .as_ref()
                     .map(|s| s.branch.clone())
                     .unwrap_or_else(|| "HEAD".into());
+                let ahead_count = state.as_ref().map(|s| s.ahead_count).unwrap_or(0);
+
+                let mut action_push = false;
 
                 // --- REPOSITORY SUMMARY BAR ---
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(20, 23, 30))
+                    .fill(if self.light_mode { egui::Color32::from_rgb(240, 243, 248) } else { egui::Color32::from_rgb(20, 23, 30) })
                     .inner_margin(egui::Margin::symmetric(12, 6))
                     .corner_radius(egui::CornerRadius::same(6))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(34, 39, 52)))
+                    .stroke(egui::Stroke::new(1.0, if self.light_mode { egui::Color32::from_rgb(215, 222, 234) } else { egui::Color32::from_rgb(34, 39, 52) }))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new(project.display().to_string())
                                     .monospace()
-                                    .color(egui::Color32::from_rgb(140, 150, 170)),
+                                    .color(if self.light_mode { egui::Color32::from_rgb(80, 90, 110) } else { egui::Color32::from_rgb(140, 150, 170) }),
                             );
 
                             ui.separator();
                             ui.label(
                                 egui::RichText::new(format!("🌿 {branch_name}"))
-                                    .color(egui::Color32::from_rgb(110, 185, 235))
+                                    .color(if self.light_mode { egui::Color32::from_rgb(20, 95, 175) } else { egui::Color32::from_rgb(110, 185, 235) })
                                     .strong(),
                             );
 
@@ -1188,11 +1449,55 @@ impl eframe::App for LazyCommitApp {
                                 ))
                                 .size(11.0)
                                 .color(if staged_len > 0 {
-                                    egui::Color32::from_rgb(120, 210, 150)
+                                    if self.light_mode { egui::Color32::from_rgb(25, 125, 55) } else { egui::Color32::from_rgb(120, 210, 150) }
                                 } else {
-                                    egui::Color32::from_rgb(150, 160, 180)
+                                    if self.light_mode { egui::Color32::from_rgb(120, 130, 150) } else { egui::Color32::from_rgb(150, 160, 180) }
                                 }),
                             );
+
+                            // Push button right-aligned in summary bar
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let push_label = if ahead_count > 0 {
+                                    format!("🚀 Push ({ahead_count})")
+                                } else {
+                                    "🚀 Push".to_string()
+                                };
+
+                                let (btn_bg, btn_fg, btn_border) = if ahead_count > 0 {
+                                    if self.light_mode {
+                                        (egui::Color32::from_rgb(30, 110, 215), egui::Color32::WHITE, egui::Color32::from_rgb(25, 95, 185))
+                                    } else {
+                                        (egui::Color32::from_rgb(32, 85, 170), egui::Color32::WHITE, egui::Color32::from_rgb(45, 115, 220))
+                                    }
+                                } else {
+                                    if self.light_mode {
+                                        (egui::Color32::from_rgb(225, 230, 240), egui::Color32::from_rgb(50, 60, 80), egui::Color32::from_rgb(195, 205, 220))
+                                    } else {
+                                        (egui::Color32::from_rgb(30, 36, 48), egui::Color32::from_rgb(180, 195, 215), egui::Color32::from_rgb(48, 58, 78))
+                                    }
+                                };
+
+                                let push_btn = egui::Button::new(
+                                    egui::RichText::new(push_label)
+                                        .size(11.5)
+                                        .strong()
+                                        .color(btn_fg),
+                                )
+                                .fill(btn_bg)
+                                .stroke(egui::Stroke::new(1.0, btn_border))
+                                .corner_radius(egui::CornerRadius::same(4))
+                                .min_size(egui::Vec2::new(0.0, 21.0));
+
+                                let tooltip = if ahead_count > 0 {
+                                    format!("Push {ahead_count} unpushed commit(s) to remote (git push)")
+                                } else {
+                                    "Push current branch commits to remote repository (git push)".to_string()
+                                };
+
+                                if ui.add_enabled(!busy, push_btn).on_hover_text(tooltip).clicked() {
+                                    action_push = true;
+                                }
+                            });
                         });
                     });
 
@@ -1671,6 +1976,7 @@ impl eframe::App for LazyCommitApp {
 
                                     if ui.add(wrap_btn).on_hover_text("Toggle line wrapping vs horizontal scrolling").clicked() {
                                         self.wrap_lines = !self.wrap_lines;
+                                        self.save_session();
                                     }
                                 });
 
@@ -1828,6 +2134,23 @@ impl eframe::App for LazyCommitApp {
                                     commit_clicked = true;
                                 }
 
+                                if ahead_count > 0 {
+                                    let push_btn = egui::Button::new(
+                                        egui::RichText::new(format!("🚀 Push ({ahead_count})"))
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(egui::Color32::from_rgb(32, 85, 170));
+
+                                    if ui
+                                        .add_enabled(!busy, push_btn)
+                                        .on_hover_text(format!("Push {ahead_count} unpushed commit(s) to remote (git push)"))
+                                        .clicked()
+                                    {
+                                        action_push = true;
+                                    }
+                                }
+
                                 if !has_staged && (!unstaged.is_empty() || !untracked.is_empty()) {
                                     let stage_all_gen_btn = egui::Button::new(
                                         egui::RichText::new("⚡ Stage All & Generate")
@@ -1933,6 +2256,9 @@ impl eframe::App for LazyCommitApp {
                 if commit_clicked {
                     self.commit(active_id);
                 }
+                if action_push {
+                    self.push_tab(active_id);
+                }
             });
         });
 
@@ -1951,7 +2277,7 @@ impl eframe::App for LazyCommitApp {
                     ui.vertical(|ui| {
                         ui.label(
                             egui::RichText::new(
-                                "Synthesize committed work across your repositories into a boss-ready end-of-day summary.",
+                                "Synthesize committed work across your repositories into a concise, technical end-of-day summary.",
                             )
                             .size(12.0)
                             .color(egui::Color32::from_rgb(150, 160, 180)),
@@ -2096,7 +2422,7 @@ impl eframe::App for LazyCommitApp {
                                         .desired_rows(20)
                                         .font(egui::TextStyle::Monospace)
                                         .hint_text(
-                                            "Click '✦ Generate AI Report' to produce a polished executive report,\n\
+                                            "Click '✦ Generate AI Report' to produce a concise technical report,\n\
                                              or click 'Preview Raw Commits' to see aggregated git logs across repositories.",
                                         ),
                                 );
@@ -2158,4 +2484,31 @@ pub fn run(initial_project: Option<PathBuf>) -> eframe::Result {
         options,
         Box::new(move |_cc| Ok(Box::new(LazyCommitApp::with_project(initial_project)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_saved_session_serde() {
+        let session = SavedSession {
+            open_projects: vec![
+                PathBuf::from("/path/to/project1"),
+                PathBuf::from("/path/to/project2"),
+            ],
+            active_project: Some(PathBuf::from("/path/to/project1")),
+            light_mode: Some(true),
+            wrap_lines: Some(false),
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        let loaded: SavedSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.open_projects.len(), 2);
+        assert_eq!(
+            loaded.active_project,
+            Some(PathBuf::from("/path/to/project1"))
+        );
+        assert_eq!(loaded.light_mode, Some(true));
+        assert_eq!(loaded.wrap_lines, Some(false));
+    }
 }

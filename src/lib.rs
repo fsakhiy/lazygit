@@ -1,9 +1,9 @@
-pub mod report;
 pub mod diff_view;
+pub mod report;
 
 pub use report::{
-    collect_all_activity, collect_repo_commits, detect_git_author, find_git_repos,
-    format_activity_prompt, RepoActivity,
+    RepoActivity, collect_all_activity, collect_repo_commits, detect_git_author, find_git_repos,
+    format_activity_prompt,
 };
 
 use serde::{Deserialize, Serialize};
@@ -150,6 +150,47 @@ Rules:
     )
 }
 
+/// Builds the system and user prompts for daily report generation.
+pub fn build_daily_report_prompts(activity: &str) -> (String, String) {
+    let (prepared_activity, was_truncated) = prepare_diff(activity);
+    let system_prompt = "\
+You are a technical assistant generating a concise, factual daily engineering report from git commit logs across one or more projects.
+Write a short, highly technical report synthesizing actual changes into a single unified list. Avoid buzzwords, executive summaries, marketing speak, and corporate fluff.
+
+Format Guidelines:
+# Daily Report
+
+- Bullet points of technical changes categorized with tags:
+  - **feat**: New functionality or capabilities
+  - **fix**: Bug fixes and issue resolutions
+  - **sec**: Security updates or vulnerability patches
+  - **refactor** / **perf** / **chore**: Internal code improvements, optimizations, or maintenance
+  - **test**: Test suite additions or updates
+
+Merge & Consolidation Rules:
+- One unified output: Do NOT split into separate project headers or sections. Synthesize all selected projects into a single consolidated list.
+- Merge related changes: If multiple commits or multiple repositories work on the same feature, API, or bug fix (e.g., frontend and backend changes for team management), combine them into a single cohesive bullet point rather than multiple fragmented entries.
+- Contextual references: Mention the relevant project(s) or component(s) concisely where helpful (e.g., 'across dashboard and gateway', or '(gateway)').
+- Keep bullets compact, single-line, direct, and factual. Focus on technical specifics (e.g. components, APIs, database migrations, bug causes).
+- Do NOT include an executive summary, high-level narrative overview, conclusion, or conversational greeting.
+- Strictly avoid corporate buzzwords (e.g., 'streamlined', 'leveraged', 'synergy', 'game-changing', 'elevated').
+- Do NOT speculate or invent changes, blockers, or next steps not present in the commit log.";
+
+    let user_prompt = if was_truncated {
+        format!(
+            "Generate a unified, concise technical daily report merging related changes across today's git commits from all projects (note: commit history was truncated due to length):\n\n{}",
+            prepared_activity
+        )
+    } else {
+        format!(
+            "Generate a unified, concise technical daily report merging related changes across today's git commits from all projects:\n\n{}",
+            prepared_activity
+        )
+    };
+
+    (system_prompt.to_string(), user_prompt)
+}
+
 /// Summarizes committed git history across repositories into a daily end-of-day report.
 pub fn generate_daily_report(
     activity: &str,
@@ -158,45 +199,13 @@ pub fn generate_daily_report(
     base_url: &str,
     temperature: Option<f32>,
 ) -> Result<String, String> {
-    let (prepared_activity, was_truncated) = prepare_diff(activity);
-    let system_prompt = "\
-You are an engineering assistant helping a software developer prepare a Daily End-of-Day (EOD) Report for their manager/boss.
-Review the provided git commit history across projects and write a polished, professional report.
-
-Format Guidelines:
-# Daily Engineering Report
-
-## Executive Summary
-- 2 to 3 concise bullet points highlighting key deliverables, breakthroughs, or progress achieved.
-
-## Work Completed (Grouped by Project)
-### [Project Name]
-- Bullet points describing features added, bugs resolved, tests created, or refactoring completed.
-- Focus on business and technical value (what was achieved and why), grounded strictly in the commit log.
-- Do not invent uncommitted tasks or mention raw git commit SHAs unless necessary.
-
-## Next Steps / Blockers (Optional)
-- Brief bullet points on what's next or any blockers if inferable, or omit if not applicable.
-
-Tone: Professional, clear, concise, and easy to scan for management.";
-
-    let user_prompt = if was_truncated {
-        format!(
-            "Generate my Daily EOD Report from today's git commits across my repositories (note: commit history was truncated due to length):\n\n{}",
-            prepared_activity
-        )
-    } else {
-        format!(
-            "Generate my Daily EOD Report from today's git commits across my repositories:\n\n{}",
-            prepared_activity
-        )
-    };
+    let (system_prompt, user_prompt) = build_daily_report_prompts(activity);
 
     send_chat_completion(
         vec![
             ChatMessage {
                 role: "system".to_owned(),
-                content: system_prompt.to_owned(),
+                content: system_prompt,
             },
             ChatMessage {
                 role: "user".to_owned(),
@@ -209,4 +218,34 @@ Tone: Professional, clear, concise, and easy to scan for management.";
         temperature,
         60,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_daily_report_prompts_content() {
+        let sample_activity = "=== COMMIT 123 ===\nfeat: add login endpoint";
+        let (sys, user) = build_daily_report_prompts(sample_activity);
+
+        // Verify focus on technical concise changes without executive summary or buzzwords
+        assert!(!sys.contains("Executive Summary"));
+        assert!(sys.contains("**feat**"));
+        assert!(sys.contains("**fix**"));
+        assert!(sys.contains("**sec**"));
+        assert!(sys.contains("buzzwords"));
+        assert!(sys.contains("Merge related changes"));
+        assert!(sys.contains("One unified output"));
+        assert!(user.contains("concise technical daily report"));
+        assert!(user.contains("feat: add login endpoint"));
+    }
+
+    #[test]
+    fn test_build_daily_report_prompts_truncated() {
+        // Construct activity longer than MAX_CHARS (800_000)
+        let long_activity = "a".repeat(850_000);
+        let (_sys, user) = build_daily_report_prompts(&long_activity);
+        assert!(user.contains("truncated due to length"));
+    }
 }
