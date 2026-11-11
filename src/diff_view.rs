@@ -74,10 +74,10 @@ pub enum DiffAction {
     StageFile(String),
     UnstageFile(String),
     DiscardFile(String, bool), // (path, is_untracked)
-    StageHunk(String),        // patch string
-    UnstageHunk(String),      // patch string
-    DiscardHunk(String),      // patch string
-    ToggleCollapse(String),   // path
+    StageHunk(String),         // patch string
+    UnstageHunk(String),       // patch string
+    DiscardHunk(String),       // patch string
+    ToggleCollapse(String),    // path
 }
 
 // ---------------- Tokenization and Intra-Line LCS ----------------
@@ -124,7 +124,11 @@ fn tokenize(s: &str) -> Vec<Token<'_>> {
             }
         }
 
-        let end_char = if j < chars.len() { chars[j].0 } else { chars.len() };
+        let end_char = if j < chars.len() {
+            chars[j].0
+        } else {
+            chars.len()
+        };
         let end_byte = if j < chars.len() { chars[j].1 } else { s.len() };
 
         tokens.push(Token {
@@ -137,7 +141,10 @@ fn tokenize(s: &str) -> Vec<Token<'_>> {
     tokens
 }
 
-fn compute_token_lcs(tokens1: &[Token], tokens2: &[Token]) -> (Vec<(usize, usize)>, Vec<(usize, usize)>) {
+fn compute_token_lcs(
+    tokens1: &[Token],
+    tokens2: &[Token],
+) -> (Vec<(usize, usize)>, Vec<(usize, usize)>) {
     let n = tokens1.len();
     let m = tokens2.len();
 
@@ -231,7 +238,9 @@ pub fn parse_unified_diff(
         // Check if this starts a file
         if cur.starts_with("diff --git ")
             || cur.starts_with("diff --no-index ")
-            || (cur.starts_with("--- ") && line_idx + 1 < lines.len() && lines[line_idx + 1].starts_with("+++ "))
+            || (cur.starts_with("--- ")
+                && line_idx + 1 < lines.len()
+                && lines[line_idx + 1].starts_with("+++ "))
         {
             let mut file_path = default_path.unwrap_or("unknown").to_string();
             let mut old_path = file_path.clone();
@@ -296,7 +305,8 @@ pub fn parse_unified_diff(
 
                 // Hunk header: @@ -old_start,old_count +new_start,new_count @@ context
                 let header_raw = hl.to_string();
-                let (old_start, old_count, new_start, new_count, context_name) = parse_hunk_header(hl);
+                let (old_start, old_count, new_start, new_count, context_name) =
+                    parse_hunk_header(hl);
                 line_idx += 1;
 
                 let mut hunk_lines = Vec::new();
@@ -442,7 +452,10 @@ fn parse_hunk_header(header: &str) -> (usize, usize, usize, usize, String) {
         context_name = if new_count <= 1 {
             format!("Line {new_start}")
         } else {
-            format!("Lines {new_start}..{}", new_start + new_count.saturating_sub(1))
+            format!(
+                "Lines {new_start}..{}",
+                new_start + new_count.saturating_sub(1)
+            )
         };
     }
 
@@ -597,15 +610,11 @@ pub fn render_sublime_button(
     text: &str,
     hover_tooltip: &str,
 ) -> egui::Response {
-    let btn = egui::Button::new(
-        egui::RichText::new(text)
-            .size(11.0)
-            .color(theme.btn_text),
-    )
-    .fill(theme.btn_bg)
-    .stroke(Stroke::new(1.0, theme.btn_border))
-    .corner_radius(CornerRadius::same(4))
-    .min_size(Vec2::new(0.0, 21.0));
+    let btn = egui::Button::new(egui::RichText::new(text).size(11.0).color(theme.btn_text))
+        .fill(theme.btn_bg)
+        .stroke(Stroke::new(1.0, theme.btn_border))
+        .corner_radius(CornerRadius::same(4))
+        .min_size(Vec2::new(0.0, 21.0));
 
     let mut resp = ui.add(btn);
     if !hover_tooltip.is_empty() {
@@ -619,10 +628,13 @@ pub fn render_status_badge(ui: &mut egui::Ui, status: DiffFileStatus) {
     let badge_letter = status.badge_letter();
 
     let (rect, _) = ui.allocate_exact_size(Vec2::new(16.0, 16.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same(3), badge_color);
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(3), badge_color);
 
     let font_id = FontId::proportional(10.5);
-    let galley = ui.painter().layout_no_wrap(badge_letter.to_string(), font_id, Color32::WHITE);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(badge_letter.to_string(), font_id, Color32::WHITE);
     let text_pos = egui::pos2(
         rect.center().x - galley.size().x / 2.0,
         rect.center().y - galley.size().y / 2.0,
@@ -706,7 +718,10 @@ pub fn render_diff_view(
                     |ui| {
                         // Caret toggle
                         let caret = if is_collapsed { "▶" } else { "▼" };
-                        if ui.button(egui::RichText::new(caret).size(10.0).color(theme.btn_text)).clicked() {
+                        if ui
+                            .button(egui::RichText::new(caret).size(10.0).color(theme.btn_text))
+                            .clicked()
+                        {
                             actions.push(DiffAction::ToggleCollapse(file.path.clone()));
                         }
 
@@ -737,21 +752,46 @@ pub fn render_diff_view(
                         // Right-aligned file actions
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if file.is_staged {
-                                if render_sublime_button(ui, theme, "Unstage", "Unstage this file back to working tree").clicked() {
+                                if render_sublime_button(
+                                    ui,
+                                    theme,
+                                    "Unstage",
+                                    "Unstage this file back to working tree",
+                                )
+                                .clicked()
+                                {
                                     actions.push(DiffAction::UnstageFile(file.path.clone()));
                                 }
                             } else if file.status == DiffFileStatus::Untracked {
-                                if render_sublime_button(ui, theme, "Stage", "Stage untracked file").clicked() {
+                                if render_sublime_button(ui, theme, "Stage", "Stage untracked file")
+                                    .clicked()
+                                {
                                     actions.push(DiffAction::StageFile(file.path.clone()));
                                 }
-                                if render_sublime_button(ui, theme, "Delete", "Delete untracked file from disk").clicked() {
+                                if render_sublime_button(
+                                    ui,
+                                    theme,
+                                    "Delete",
+                                    "Delete untracked file from disk",
+                                )
+                                .clicked()
+                                {
                                     actions.push(DiffAction::DiscardFile(file.path.clone(), true));
                                 }
                             } else {
-                                if render_sublime_button(ui, theme, "Stage", "Stage modified file").clicked() {
+                                if render_sublime_button(ui, theme, "Stage", "Stage modified file")
+                                    .clicked()
+                                {
                                     actions.push(DiffAction::StageFile(file.path.clone()));
                                 }
-                                if render_sublime_button(ui, theme, "Discard", "Discard working changes for this file").clicked() {
+                                if render_sublime_button(
+                                    ui,
+                                    theme,
+                                    "Discard",
+                                    "Discard working changes for this file",
+                                )
+                                .clicked()
+                                {
                                     actions.push(DiffAction::DiscardFile(file.path.clone(), false));
                                 }
                             }
@@ -790,20 +830,50 @@ pub fn render_diff_view(
                                     .color(theme.hunk_text_context),
                             );
 
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if file.is_staged {
-                                    if render_sublime_button(ui, theme, "Unstage Hunk", "Unstage this specific hunk from git index").clicked() {
-                                        actions.push(DiffAction::UnstageHunk(hunk.raw_patch.clone()));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if file.is_staged {
+                                        if render_sublime_button(
+                                            ui,
+                                            theme,
+                                            "Unstage Hunk",
+                                            "Unstage this specific hunk from git index",
+                                        )
+                                        .clicked()
+                                        {
+                                            actions.push(DiffAction::UnstageHunk(
+                                                hunk.raw_patch.clone(),
+                                            ));
+                                        }
+                                    } else {
+                                        if render_sublime_button(
+                                            ui,
+                                            theme,
+                                            "Stage Hunk",
+                                            "Stage this specific hunk into git index",
+                                        )
+                                        .clicked()
+                                        {
+                                            actions.push(DiffAction::StageHunk(
+                                                hunk.raw_patch.clone(),
+                                            ));
+                                        }
+                                        if render_sublime_button(
+                                            ui,
+                                            theme,
+                                            "Discard Hunk",
+                                            "Discard changes in this specific hunk",
+                                        )
+                                        .clicked()
+                                        {
+                                            actions.push(DiffAction::DiscardHunk(
+                                                hunk.raw_patch.clone(),
+                                            ));
+                                        }
                                     }
-                                } else {
-                                    if render_sublime_button(ui, theme, "Stage Hunk", "Stage this specific hunk into git index").clicked() {
-                                        actions.push(DiffAction::StageHunk(hunk.raw_patch.clone()));
-                                    }
-                                    if render_sublime_button(ui, theme, "Discard Hunk", "Discard changes in this specific hunk").clicked() {
-                                        actions.push(DiffAction::DiscardHunk(hunk.raw_patch.clone()));
-                                    }
-                                }
-                            });
+                                },
+                            );
                         },
                     );
                 });
@@ -821,24 +891,32 @@ pub fn render_diff_view(
                     (None, row_min_height)
                 } else if wrap_lines {
                     let wrap_width = (content_width - gutter_width - 24.0).max(60.0);
-                    let g = ui.painter().layout(line.text.clone(), font_id.clone(), text_color, wrap_width);
+                    let g = ui.painter().layout(
+                        line.text.clone(),
+                        font_id.clone(),
+                        text_color,
+                        wrap_width,
+                    );
                     let h = (g.size().y + 5.0).max(row_min_height);
                     (Some(g), h)
                 } else {
-                    let g = ui.painter().layout_no_wrap(line.text.clone(), font_id.clone(), text_color);
+                    let g =
+                        ui.painter()
+                            .layout_no_wrap(line.text.clone(), font_id.clone(), text_color);
                     (Some(g), row_min_height)
                 };
 
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(content_width, line_height), egui::Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(
+                    Vec2::new(content_width, line_height),
+                    egui::Sense::hover(),
+                );
 
                 // 1. Full-width row background
                 ui.painter().rect_filled(rect, CornerRadius::ZERO, row_bg);
 
                 // 2. Gutter background & border
-                let gutter_rect = Rect::from_min_max(
-                    rect.min,
-                    egui::pos2(rect.min.x + gutter_width, rect.max.y),
-                );
+                let gutter_rect =
+                    Rect::from_min_max(rect.min, egui::pos2(rect.min.x + gutter_width, rect.max.y));
                 ui.painter().line_segment(
                     [gutter_rect.right_top(), gutter_rect.right_bottom()],
                     Stroke::new(1.0, theme.gutter_border),
@@ -853,9 +931,12 @@ pub fn render_diff_view(
                     } else {
                         theme.gutter_text_context
                     };
-                    let g_old = ui.painter().layout_no_wrap(old_str, font_id.clone(), num_color);
+                    let g_old = ui
+                        .painter()
+                        .layout_no_wrap(old_str, font_id.clone(), num_color);
                     let x_pos = gutter_rect.left() + col_width - g_old.size().x;
-                    ui.painter().galley(egui::pos2(x_pos, num_y), g_old, num_color);
+                    ui.painter()
+                        .galley(egui::pos2(x_pos, num_y), g_old, num_color);
                 }
 
                 // 4. New line number (Col 2)
@@ -866,9 +947,12 @@ pub fn render_diff_view(
                     } else {
                         theme.gutter_text_context
                     };
-                    let g_new = ui.painter().layout_no_wrap(new_str, font_id.clone(), num_color);
+                    let g_new = ui
+                        .painter()
+                        .layout_no_wrap(new_str, font_id.clone(), num_color);
                     let x_pos = gutter_rect.left() + (col_width * 2.0) - g_new.size().x;
-                    ui.painter().galley(egui::pos2(x_pos, num_y), g_new, num_color);
+                    ui.painter()
+                        .galley(egui::pos2(x_pos, num_y), g_new, num_color);
                 }
 
                 // 5. Code text & Intra-line Highlights
@@ -886,32 +970,51 @@ pub fn render_diff_view(
                     if let Some(hl_color) = hl_bg {
                         for &(char_start, char_end) in &line.intra_highlights {
                             if char_start < char_end {
-                                let r_start = g.pos_from_cursor(egui::text::CCursor::new(char_start));
+                                let r_start =
+                                    g.pos_from_cursor(egui::text::CCursor::new(char_start));
                                 let r_end = g.pos_from_cursor(egui::text::CCursor::new(char_end));
 
                                 if (r_end.min.y - r_start.min.y).abs() < 4.0 {
-                                    let y_top = (code_pos.y + r_start.min.y - 1.0).max(rect.min.y + 1.0);
-                                    let y_bot = (code_pos.y + r_start.max.y + 1.0).min(rect.max.y - 1.0);
+                                    let y_top =
+                                        (code_pos.y + r_start.min.y - 1.0).max(rect.min.y + 1.0);
+                                    let y_bot =
+                                        (code_pos.y + r_start.max.y + 1.0).min(rect.max.y - 1.0);
                                     let hl_rect = Rect::from_min_max(
                                         egui::pos2(code_x + r_start.min.x, y_top),
                                         egui::pos2(code_x + r_end.min.x, y_bot),
                                     );
-                                    ui.painter().rect_filled(hl_rect, CornerRadius::same(2), hl_color);
+                                    ui.painter().rect_filled(
+                                        hl_rect,
+                                        CornerRadius::same(2),
+                                        hl_color,
+                                    );
                                 } else {
-                                    let y1_top = (code_pos.y + r_start.min.y - 1.0).max(rect.min.y + 1.0);
-                                    let y1_bot = (code_pos.y + r_start.max.y + 1.0).min(rect.max.y - 1.0);
+                                    let y1_top =
+                                        (code_pos.y + r_start.min.y - 1.0).max(rect.min.y + 1.0);
+                                    let y1_bot =
+                                        (code_pos.y + r_start.max.y + 1.0).min(rect.max.y - 1.0);
                                     let hl_rect1 = Rect::from_min_max(
                                         egui::pos2(code_x + r_start.min.x, y1_top),
                                         egui::pos2(code_x + g.size().x, y1_bot),
                                     );
-                                    let y2_top = (code_pos.y + r_end.min.y - 1.0).max(rect.min.y + 1.0);
-                                    let y2_bot = (code_pos.y + r_end.max.y + 1.0).min(rect.max.y - 1.0);
+                                    let y2_top =
+                                        (code_pos.y + r_end.min.y - 1.0).max(rect.min.y + 1.0);
+                                    let y2_bot =
+                                        (code_pos.y + r_end.max.y + 1.0).min(rect.max.y - 1.0);
                                     let hl_rect2 = Rect::from_min_max(
                                         egui::pos2(code_x, y2_top),
                                         egui::pos2(code_x + r_end.min.x, y2_bot),
                                     );
-                                    ui.painter().rect_filled(hl_rect1, CornerRadius::same(2), hl_color);
-                                    ui.painter().rect_filled(hl_rect2, CornerRadius::same(2), hl_color);
+                                    ui.painter().rect_filled(
+                                        hl_rect1,
+                                        CornerRadius::same(2),
+                                        hl_color,
+                                    );
+                                    ui.painter().rect_filled(
+                                        hl_rect2,
+                                        CornerRadius::same(2),
+                                        hl_color,
+                                    );
                                 }
                             }
                         }
@@ -990,7 +1093,12 @@ index 1234567..89abcdef 100644
 +world
 +foo
 "#;
-        let files = parse_unified_diff(diff, Some("new_file.txt"), false, Some(DiffFileStatus::Untracked));
+        let files = parse_unified_diff(
+            diff,
+            Some("new_file.txt"),
+            false,
+            Some(DiffFileStatus::Untracked),
+        );
         assert_eq!(files.len(), 1);
         let f = &files[0];
         assert_eq!(f.status, DiffFileStatus::Untracked);
@@ -1044,14 +1152,14 @@ index 3333333..4444444 100644
         }
     }
 
-
     #[test]
     fn test_hunk_patch_application() {
-        let path_buf = std::env::temp_dir().join(format!("lazycommit_test_hunk_{}", std::process::id()));
+        let path_buf =
+            std::env::temp_dir().join(format!("lazycommit_test_hunk_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path_buf);
         std::fs::create_dir_all(&path_buf).unwrap();
         let path = &path_buf;
-        
+
         let run = |args: &[&str]| {
             let res = std::process::Command::new("git")
                 .arg("-C")
@@ -1059,7 +1167,12 @@ index 3333333..4444444 100644
                 .args(args)
                 .output()
                 .unwrap();
-            assert!(res.status.success(), "git command failed: {:?} => {}", args, String::from_utf8_lossy(&res.stderr));
+            assert!(
+                res.status.success(),
+                "git command failed: {:?} => {}",
+                args,
+                String::from_utf8_lossy(&res.stderr)
+            );
             String::from_utf8_lossy(&res.stdout).into_owned()
         };
 
@@ -1073,7 +1186,9 @@ index 3333333..4444444 100644
         run(&["add", "demo.txt"]);
         run(&["commit", "-m", "initial"]);
 
-        let modified_text = "line1_mod\n".to_string() + &(0..14).map(|_| "line1\n").collect::<String>() + "line2_mod\n";
+        let modified_text = "line1_mod\n".to_string()
+            + &(0..14).map(|_| "line1\n").collect::<String>()
+            + "line2_mod\n";
         std::fs::write(&file_path, &modified_text).unwrap();
 
         let diff_str = run(&["diff", "demo.txt"]);
@@ -1083,7 +1198,7 @@ index 3333333..4444444 100644
 
         // Apply only the first hunk
         let hunk1_patch = &files[0].hunks[0].raw_patch;
-        
+
         use std::io::Write;
         let mut child = std::process::Command::new("git")
             .arg("-C")
@@ -1095,9 +1210,18 @@ index 3333333..4444444 100644
             .spawn()
             .unwrap();
 
-        child.stdin.take().unwrap().write_all(hunk1_patch.as_bytes()).unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(hunk1_patch.as_bytes())
+            .unwrap();
         let out = child.wait_with_output().unwrap();
-        assert!(out.status.success(), "git apply failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git apply failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
 
         let staged = run(&["diff", "--cached"]);
         assert!(staged.contains("line1_mod"));

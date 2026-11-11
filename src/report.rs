@@ -18,11 +18,22 @@ fn run_git_in(dir: &Path, args: &[&str]) -> Result<String, String> {
         .arg(dir)
         .args(args)
         .output()
-        .map_err(|e| format!("Failed to run 'git {}' in {}: {}", args.join(" "), dir.display(), e))?;
+        .map_err(|e| {
+            format!(
+                "Failed to run 'git {}' in {}: {}",
+                args.join(" "),
+                dir.display(),
+                e
+            )
+        })?;
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git command failed in {}: {}", dir.display(), err.trim()));
+        return Err(format!(
+            "git command failed in {}: {}",
+            dir.display(),
+            err.trim()
+        ));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -138,12 +149,7 @@ pub fn collect_repo_commits(
         return Ok(None);
     }
 
-    let mut args = vec![
-        "log",
-        "--branches",
-        "HEAD",
-        "--no-merges",
-    ];
+    let mut args = vec!["log", "--branches", "HEAD", "--no-merges"];
 
     let since_arg = format!("--since={since}");
     args.push(&since_arg);
@@ -261,6 +267,10 @@ mod tests {
         let cur = std::env::current_dir().unwrap();
         let repos = find_git_repos(&[cur.clone()]);
         assert!(!repos.is_empty());
-        assert!(repos.iter().any(|r| r == &cur || r.ends_with("commit-generator")));
+        assert!(
+            repos
+                .iter()
+                .any(|r| r == &cur || r.ends_with("commit-generator"))
+        );
     }
 }

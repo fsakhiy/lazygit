@@ -146,7 +146,10 @@ fn main() {
         paths.push(env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     }
 
-    eprintln!("Scanning for Git repositories in {} location(s)...", paths.len());
+    eprintln!(
+        "Scanning for Git repositories in {} location(s)...",
+        paths.len()
+    );
     let repos = find_git_repos(&paths);
     if repos.is_empty() {
         eprintln!("Error: No Git repositories found in the specified path(s).");
